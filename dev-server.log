@@ -1,0 +1,25 @@
+
+> iron-man@0.1.0 dev
+> next dev --hostname 127.0.0.1 --port 3000
+
+▲ Next.js 16.2.2 (Turbopack)
+- Local:         http://127.0.0.1:3000
+- Network:       http://127.0.0.1:3000
+✓ Ready in 1148ms
+Creating turbopack project {
+  dir: 'C:\\Users\\hp\\OneDrive\\Desktop\\iron-man-main\\iron-man-main',
+  testMode: true
+}
+
+○ Compiling / ...
+ HEAD / 200 in 7.7s (next.js: 7.2s, application-code: 479ms)
+ GET / 200 in 142ms (next.js: 36ms, application-code: 106ms)
+ GET / 200 in 345ms (next.js: 153ms, application-code: 192ms)
+✓ Compiled in 326ms
+✓ Compiled in 780ms
+✓ Compiled in 989ms
+✓ Compiled in 552ms
+✓ Compiled in 512ms
+ GET / 200 in 1383ms (next.js: 882ms, application-code: 500ms)
+ GET / 200 in 890ms (next.js: 451ms, application-code: 439ms)
+ GET / 200 in 880ms (next.js: 402ms, application-code: 478ms)
