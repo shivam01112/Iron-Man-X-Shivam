@@ -20,6 +20,10 @@
 # production
 /build
 
+# local source archives (runtime uses the extracted frames)
+/public/frames-30fps.zip
+/public/frames3.zip
+
 # misc
 .DS_Store
 *.pem
