@@ -9,15 +9,20 @@ import {
   spiderFramePath,
 } from "@/lib/spiderman";
 
-const PARALLEL_FRAME_LOADS = 10;
-const INITIAL_LOOK_AHEAD = 36;
-const MAX_LOOK_AHEAD = 64;
-const LOOK_BEHIND = 12;
+const PARALLEL_FRAME_LOADS = 6;
+const INITIAL_LOOK_AHEAD = 16;
+const MAX_LOOK_AHEAD = 28;
+const LOOK_BEHIND = 6;
+const CACHE_BUFFER = 8;
+const CANCEL_LOADS_AFTER_JUMP = 8;
+const NEAREST_FRAME_SEARCH = 24;
+const MAX_CANVAS_PIXELS = 1920 * 1080;
 const SCROLL_PIXELS_PER_FRAME = 9;
 
 export function SpiderManReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const introRef = useRef<HTMLDivElement | null>(null);
   const outroRef = useRef<HTMLDivElement | null>(null);
   const progressRef = useRef<HTMLDivElement | null>(null);
@@ -46,6 +51,7 @@ export function SpiderManReveal() {
     let protectedFrames = new Set<number>();
     let lastRequestedFrame = 0;
     const images = new Array<HTMLImageElement | undefined>(SPIDER_FRAME_COUNT);
+    const activeImages = new Map<number, HTMLImageElement>();
     const frameState = new Array<0 | 1 | 2 | 3>(SPIDER_FRAME_COUNT).fill(0);
     frameReadyRef.current = new Array<boolean>(SPIDER_FRAME_COUNT).fill(false);
     framesRef.current = images;
@@ -85,10 +91,13 @@ export function SpiderManReveal() {
         activeLoads += 1;
         frameState[index] = 1;
         image.decoding = "async";
-        image.fetchPriority = index === targetFrameRef.current ? "high" : "auto";
+        image.fetchPriority = Math.abs(index - targetFrameRef.current) <= 1 ? "high" : "auto";
         images[index] = image;
+        activeImages.set(index, image);
 
         image.onload = () => {
+          if (activeImages.get(index) !== image) return;
+          activeImages.delete(index);
           activeLoads -= 1;
           if (cancelled) return;
           frameState[index] = 2;
@@ -104,11 +113,15 @@ export function SpiderManReveal() {
             }
           }
 
-          if (index === targetFrameRef.current) renderFrameRef.current();
-          evictDistantFrames(protectedFrames.size + 24);
+          if (Math.abs(index - targetFrameRef.current) <= NEAREST_FRAME_SEARCH) {
+            renderFrameRef.current();
+          }
+          evictDistantFrames(protectedFrames.size + CACHE_BUFFER);
           pumpQueue();
         };
         image.onerror = () => {
+          if (activeImages.get(index) !== image) return;
+          activeImages.delete(index);
           activeLoads -= 1;
           if (cancelled) return;
           frameState[index] = 3;
@@ -122,24 +135,53 @@ export function SpiderManReveal() {
       if (cancelled) return;
       const travelDirection = direction < 0 ? -1 : 1;
       const distanceMoved = Math.abs(index - lastRequestedFrame);
-      const lookAhead = Math.min(MAX_LOOK_AHEAD, INITIAL_LOOK_AHEAD + distanceMoved * 4);
+      const lookAhead = Math.min(MAX_LOOK_AHEAD, INITIAL_LOOK_AHEAD + distanceMoved * 2);
       lastRequestedFrame = index;
       const desired: number[] = [index];
 
       for (let distance = 1; distance <= lookAhead; distance += 1) {
         const frame = index + distance * travelDirection;
         if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
-      }
-      for (let distance = 1; distance <= LOOK_BEHIND; distance += 1) {
-        const frame = index - distance * travelDirection;
-        if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
+        if (distance <= LOOK_BEHIND) {
+          const trailingFrame = index - distance * travelDirection;
+          if (trailingFrame >= 0 && trailingFrame < SPIDER_FRAME_COUNT) {
+            desired.push(trailingFrame);
+          }
+        }
       }
 
       protectedFrames = new Set(desired);
       if (lastFrameRef.current >= 0) protectedFrames.add(lastFrameRef.current);
+
+      // Old in-flight requests used to occupy every connection after a fast
+      // scroll jump. Cancel them so the newly requested frame starts now.
+      if (distanceMoved > CANCEL_LOADS_AFTER_JUMP) {
+        const prioritizedActiveLoads = [...activeImages].sort(
+          ([a], [b]) => Math.abs(a - index) - Math.abs(b - index),
+        );
+        let retainedNearbyLoads = 0;
+        for (const [activeIndex, image] of prioritizedActiveLoads) {
+          if (protectedFrames.has(activeIndex)) continue;
+          if (
+            retainedNearbyLoads < 2 &&
+            Math.abs(activeIndex - index) <= NEAREST_FRAME_SEARCH
+          ) {
+            retainedNearbyLoads += 1;
+            continue;
+          }
+          activeImages.delete(activeIndex);
+          image.onload = null;
+          image.onerror = null;
+          image.src = "";
+          images[activeIndex] = undefined;
+          frameState[activeIndex] = 0;
+          activeLoads -= 1;
+        }
+      }
+
       queue = desired.filter((frame) => frameState[frame] === 0);
       pumpQueue();
-      evictDistantFrames(desired.length + 24);
+      evictDistantFrames(desired.length + CACHE_BUFFER);
     };
     ensureFramesRef.current = ensureFrames;
 
@@ -176,11 +218,15 @@ export function SpiderManReveal() {
   const drawImage = useCallback((image: HTMLImageElement) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const context = canvas.getContext("2d", { alpha: false });
+    const context = contextRef.current ?? canvas.getContext("2d", {
+      alpha: false,
+      desynchronized: true,
+    });
     if (!context) return;
+    contextRef.current = context;
 
     context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
+    context.imageSmoothingQuality = "medium";
 
     const imageRatio = image.naturalWidth / image.naturalHeight;
     const canvasRatio = canvas.width / canvas.height;
@@ -195,7 +241,6 @@ export function SpiderManReveal() {
       width = height * imageRatio;
     }
 
-    context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(
       image,
       (canvas.width - width) / 2,
@@ -212,14 +257,32 @@ export function SpiderManReveal() {
     requestAnimationFrame(() => {
       renderTickingRef.current = false;
       const target = targetFrameRef.current;
-      const image = frameReadyRef.current[target]
-        ? framesRef.current[target]
+      let drawableFrame = target;
+      if (!frameReadyRef.current[drawableFrame]) {
+        for (let distance = 1; distance <= NEAREST_FRAME_SEARCH; distance += 1) {
+          const before = target - distance;
+          const after = target + distance;
+          if (before >= 0 && frameReadyRef.current[before]) {
+            drawableFrame = before;
+            break;
+          }
+          if (after < SPIDER_FRAME_COUNT && frameReadyRef.current[after]) {
+            drawableFrame = after;
+            break;
+          }
+        }
+      }
+      const image = frameReadyRef.current[drawableFrame]
+        ? framesRef.current[drawableFrame]
         : lastImageRef.current;
       if (!image?.complete || !image.naturalWidth) return;
 
       drawImage(image);
-      if (frameReadyRef.current[target] && image === framesRef.current[target]) {
-        lastFrameRef.current = target;
+      if (
+        frameReadyRef.current[drawableFrame] &&
+        image === framesRef.current[drawableFrame]
+      ) {
+        lastFrameRef.current = drawableFrame;
       }
       lastImageRef.current = image;
     });
@@ -232,9 +295,17 @@ export function SpiderManReveal() {
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    let renderWidth = Math.round(window.innerWidth * dpr);
+    let renderHeight = Math.round(window.innerHeight * dpr);
+    const pixelCount = renderWidth * renderHeight;
+    if (pixelCount > MAX_CANVAS_PIXELS) {
+      const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
+      renderWidth = Math.round(renderWidth * scale);
+      renderHeight = Math.round(renderHeight * scale);
+    }
+    canvas.width = renderWidth;
+    canvas.height = renderHeight;
     canvas.style.width = `${window.innerWidth}px`;
     canvas.style.height = `${window.innerHeight}px`;
     renderFrame();
