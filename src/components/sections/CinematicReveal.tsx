@@ -15,9 +15,12 @@ export function CinematicReveal() {
   const seqReadoutRef = useRef<HTMLSpanElement | null>(null);
 
   const framesRef = useRef<HTMLImageElement[]>([]);
+  const frameReadyRef = useRef<boolean[]>([]);
+  const drawFrameRef = useRef<(index: number) => void>(() => undefined);
   const tickingRef = useRef(false);
   const loadedRef = useRef(false);
   const lastFrameRef = useRef(-1);
+  const targetFrameRef = useRef(0);
   const prevVisibleIdsRef = useRef("");
 
   const [loadProgress, setLoadProgress] = useState(0);
@@ -27,44 +30,90 @@ export function CinematicReveal() {
   useEffect(() => {
     let cancelled = false;
     let loadedCount = 0;
-    const imgs: HTMLImageElement[] = [];
+    let nextFrame = 0;
+    let started = false;
+    const imgs = new Array<HTMLImageElement>(CINE_FRAME_COUNT);
+    frameReadyRef.current = new Array<boolean>(CINE_FRAME_COUNT).fill(false);
+    framesRef.current = imgs;
 
-    for (let i = 1; i <= CINE_FRAME_COUNT; i++) {
+    const loadNext = () => {
+      if (cancelled || nextFrame >= CINE_FRAME_COUNT) return;
+      const index = nextFrame++;
       const img = new Image();
-      img.src = cineFramePath(i);
+      img.decoding = "async";
+      img.fetchPriority = index === 0 ? "high" : "auto";
+      imgs[index] = img;
       img.onload = () => {
         if (cancelled) return;
+        frameReadyRef.current[index] = true;
         loadedCount++;
-        setLoadProgress(loadedCount / CINE_FRAME_COUNT);
-        if (loadedCount === CINE_FRAME_COUNT) {
+        if (!loadedRef.current) setLoadProgress(Math.min(1, loadedCount / 8));
+        if (index === 0) {
           loadedRef.current = true;
           setLoaded(true);
         }
+        if (index === targetFrameRef.current) drawFrameRef.current(index);
+        loadNext();
       };
       img.onerror = () => {
         if (cancelled) return;
         loadedCount++;
-        setLoadProgress(loadedCount / CINE_FRAME_COUNT);
-        if (loadedCount === CINE_FRAME_COUNT) {
-          loadedRef.current = true;
-          setLoaded(true);
-        }
+        loadNext();
       };
-      imgs.push(img);
-    }
-    framesRef.current = imgs;
+      img.src = cineFramePath(index + 1);
+    };
+
+    const startLoading = () => {
+      if (started || cancelled) return;
+      started = true;
+      for (let worker = 0; worker < 8; worker += 1) loadNext();
+    };
+
+    const section = sectionRef.current;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) startLoading();
+      },
+      { rootMargin: "250% 0px" },
+    );
+    if (section) observer.observe(section);
 
     return () => {
       cancelled = true;
+      observer.disconnect();
+      for (const image of imgs) {
+        if (image) {
+          image.onload = null;
+          image.onerror = null;
+          image.src = "";
+        }
+      }
     };
   }, []);
 
   const drawFrame = useCallback((index: number) => {
     const canvas = canvasRef.current;
-    const img = framesRef.current[index];
+    let drawableIndex = index;
+    if (!frameReadyRef.current[drawableIndex]) {
+      for (let distance = 1; distance < CINE_FRAME_COUNT; distance += 1) {
+        const before = index - distance;
+        const after = index + distance;
+        if (before >= 0 && frameReadyRef.current[before]) {
+          drawableIndex = before;
+          break;
+        }
+        if (after < CINE_FRAME_COUNT && frameReadyRef.current[after]) {
+          drawableIndex = after;
+          break;
+        }
+      }
+    }
+    const img = framesRef.current[drawableIndex];
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
 
     const cw = canvas.width;
     const ch = canvas.height;
@@ -91,14 +140,19 @@ export function CinematicReveal() {
 
     ctx.clearRect(0, 0, cw, ch);
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
+    lastFrameRef.current = drawableIndex;
   }, []);
+
+  useEffect(() => {
+    drawFrameRef.current = drawFrame;
+  }, [drawFrame]);
 
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = window.innerWidth * dpr;
-    canvas.height = window.innerHeight * dpr;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(window.innerWidth * dpr);
+    canvas.height = Math.round(window.innerHeight * dpr);
     canvas.style.width = window.innerWidth + "px";
     canvas.style.height = window.innerHeight + "px";
     drawFrame(lastFrameRef.current >= 0 ? lastFrameRef.current : 0);
@@ -127,6 +181,7 @@ export function CinematicReveal() {
         if (!section || !loadedRef.current) return;
 
         const rect = section.getBoundingClientRect();
+        if (rect.top > window.innerHeight || rect.bottom < 0) return;
         const scrollable = section.offsetHeight - window.innerHeight;
         const progress =
           scrollable <= 0
@@ -137,8 +192,8 @@ export function CinematicReveal() {
           CINE_FRAME_COUNT - 1,
           Math.floor(progress * CINE_FRAME_COUNT),
         );
+        targetFrameRef.current = frameIndex;
         if (frameIndex !== lastFrameRef.current) {
-          lastFrameRef.current = frameIndex;
           drawFrame(frameIndex);
         }
 

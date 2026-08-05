@@ -255,6 +255,7 @@ export function SpiderManReveal() {
         if (!section) return;
 
         const rect = section.getBoundingClientRect();
+        if (rect.top > window.innerHeight || rect.bottom < 0) return;
         const scrollable = section.offsetHeight - window.innerHeight;
         const progress = Math.min(1, Math.max(0, -rect.top / scrollable));
         const frame = Math.min(
