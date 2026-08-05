@@ -9,9 +9,11 @@ import {
   spiderFramePath,
 } from "@/lib/spiderman";
 
-const FRAME_CACHE_SIZE = 36;
-const PARALLEL_FRAME_LOADS = 6;
-const SCROLL_PIXELS_PER_FRAME = 14;
+const PARALLEL_FRAME_LOADS = 10;
+const INITIAL_LOOK_AHEAD = 36;
+const MAX_LOOK_AHEAD = 64;
+const LOOK_BEHIND = 12;
+const SCROLL_PIXELS_PER_FRAME = 9;
 
 export function SpiderManReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -22,12 +24,14 @@ export function SpiderManReveal() {
   const sequenceRef = useRef<HTMLSpanElement | null>(null);
   const framesRef = useRef<Array<HTMLImageElement | undefined>>([]);
   const frameReadyRef = useRef<boolean[]>([]);
-  const drawFrameRef = useRef<(index: number) => void>(() => undefined);
+  const renderFrameRef = useRef<() => void>(() => undefined);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
   const loadingStartedRef = useRef(false);
   const loadedRef = useRef(false);
-  const tickingRef = useRef(false);
+  const scrollTickingRef = useRef(false);
+  const renderTickingRef = useRef(false);
   const lastFrameRef = useRef(-1);
+  const lastImageRef = useRef<HTMLImageElement | null>(null);
   const targetFrameRef = useRef(0);
   const previousBeatsRef = useRef("");
 
@@ -40,21 +44,22 @@ export function SpiderManReveal() {
     let activeLoads = 0;
     let queue: number[] = [];
     let protectedFrames = new Set<number>();
+    let lastRequestedFrame = 0;
     const images = new Array<HTMLImageElement | undefined>(SPIDER_FRAME_COUNT);
     const frameState = new Array<0 | 1 | 2 | 3>(SPIDER_FRAME_COUNT).fill(0);
     frameReadyRef.current = new Array<boolean>(SPIDER_FRAME_COUNT).fill(false);
     framesRef.current = images;
 
-    const evictDistantFrames = () => {
+    const evictDistantFrames = (cacheSize: number) => {
       const readyFrames = frameState
         .map((state, index) => state === 2 ? index : -1)
         .filter((index) => index >= 0);
-      if (readyFrames.length <= FRAME_CACHE_SIZE) return;
+      if (readyFrames.length <= cacheSize) return;
 
       readyFrames.sort(
         (a, b) => Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current),
       );
-      let removeCount = readyFrames.length - FRAME_CACHE_SIZE;
+      let removeCount = readyFrames.length - cacheSize;
       for (const index of readyFrames) {
         if (removeCount <= 0) break;
         if (protectedFrames.has(index)) continue;
@@ -99,10 +104,8 @@ export function SpiderManReveal() {
             }
           }
 
-          if (index === targetFrameRef.current) {
-            drawFrameRef.current(index);
-          }
-          evictDistantFrames();
+          if (index === targetFrameRef.current) renderFrameRef.current();
+          evictDistantFrames(protectedFrames.size + 24);
           pumpQueue();
         };
         image.onerror = () => {
@@ -118,21 +121,25 @@ export function SpiderManReveal() {
     const ensureFrames = (index: number, direction: number) => {
       if (cancelled) return;
       const travelDirection = direction < 0 ? -1 : 1;
+      const distanceMoved = Math.abs(index - lastRequestedFrame);
+      const lookAhead = Math.min(MAX_LOOK_AHEAD, INITIAL_LOOK_AHEAD + distanceMoved * 4);
+      lastRequestedFrame = index;
       const desired: number[] = [index];
 
-      for (let distance = 1; distance <= 22; distance += 1) {
+      for (let distance = 1; distance <= lookAhead; distance += 1) {
         const frame = index + distance * travelDirection;
         if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
       }
-      for (let distance = 1; distance <= 10; distance += 1) {
+      for (let distance = 1; distance <= LOOK_BEHIND; distance += 1) {
         const frame = index - distance * travelDirection;
         if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
       }
 
       protectedFrames = new Set(desired);
+      if (lastFrameRef.current >= 0) protectedFrames.add(lastFrameRef.current);
       queue = desired.filter((frame) => frameState[frame] === 0);
       pumpQueue();
-      evictDistantFrames();
+      evictDistantFrames(desired.length + 24);
     };
     ensureFramesRef.current = ensureFrames;
 
@@ -166,28 +173,9 @@ export function SpiderManReveal() {
     };
   }, []);
 
-  const drawFrame = useCallback((index: number) => {
+  const drawImage = useCallback((image: HTMLImageElement) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    let drawableIndex = index;
-    if (!frameReadyRef.current[drawableIndex]) {
-      for (let distance = 1; distance < SPIDER_FRAME_COUNT; distance += 1) {
-        const before = index - distance;
-        const after = index + distance;
-        if (before >= 0 && frameReadyRef.current[before]) {
-          drawableIndex = before;
-          break;
-        }
-        if (after < SPIDER_FRAME_COUNT && frameReadyRef.current[after]) {
-          drawableIndex = after;
-          break;
-        }
-      }
-    }
-
-    const image = framesRef.current[drawableIndex];
-    if (!image?.complete || !image.naturalWidth) return;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
 
@@ -215,12 +203,31 @@ export function SpiderManReveal() {
       width,
       height,
     );
-    lastFrameRef.current = drawableIndex;
   }, []);
 
+  const renderFrame = useCallback(() => {
+    if (renderTickingRef.current) return;
+    renderTickingRef.current = true;
+
+    requestAnimationFrame(() => {
+      renderTickingRef.current = false;
+      const target = targetFrameRef.current;
+      const image = frameReadyRef.current[target]
+        ? framesRef.current[target]
+        : lastImageRef.current;
+      if (!image?.complete || !image.naturalWidth) return;
+
+      drawImage(image);
+      if (frameReadyRef.current[target] && image === framesRef.current[target]) {
+        lastFrameRef.current = target;
+      }
+      lastImageRef.current = image;
+    });
+  }, [drawImage]);
+
   useEffect(() => {
-    drawFrameRef.current = drawFrame;
-  }, [drawFrame]);
+    renderFrameRef.current = renderFrame;
+  }, [renderFrame]);
 
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -230,8 +237,8 @@ export function SpiderManReveal() {
     canvas.height = Math.round(window.innerHeight * dpr);
     canvas.style.width = `${window.innerWidth}px`;
     canvas.style.height = `${window.innerHeight}px`;
-    drawFrame(lastFrameRef.current >= 0 ? lastFrameRef.current : 0);
-  }, [drawFrame]);
+    renderFrame();
+  }, [renderFrame]);
 
   useEffect(() => {
     resizeCanvas();
@@ -241,16 +248,16 @@ export function SpiderManReveal() {
 
   useEffect(() => {
     if (!loaded) return;
-    drawFrame(targetFrameRef.current);
-  }, [drawFrame, loaded]);
+    renderFrame();
+  }, [renderFrame, loaded]);
 
   useEffect(() => {
     const onScroll = () => {
-      if (tickingRef.current) return;
-      tickingRef.current = true;
+      if (scrollTickingRef.current) return;
+      scrollTickingRef.current = true;
 
       requestAnimationFrame(() => {
-        tickingRef.current = false;
+        scrollTickingRef.current = false;
         const section = sectionRef.current;
         if (!section) return;
 
@@ -263,13 +270,14 @@ export function SpiderManReveal() {
           Math.floor(progress * SPIDER_FRAME_COUNT),
         );
 
-        const direction = Math.sign(frame - targetFrameRef.current);
+        const previousFrame = targetFrameRef.current;
+        const direction = Math.sign(frame - previousFrame);
         targetFrameRef.current = frame;
         if (!loadingStartedRef.current) return;
         ensureFramesRef.current(frame, direction);
         if (!loadedRef.current) return;
         if (frame !== lastFrameRef.current) {
-          drawFrame(frame);
+          renderFrame();
         }
 
         if (introRef.current) {
@@ -306,7 +314,7 @@ export function SpiderManReveal() {
     window.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => window.removeEventListener("scroll", onScroll);
-  }, [drawFrame]);
+  }, [renderFrame]);
 
   return (
     <section
