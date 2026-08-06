@@ -1,4 +1,4 @@
-export const SPIDER_FRAME_COUNT = 1785;
+export const SPIDER_FRAME_COUNT = 644;
 
 export const spiderFramePath = (n: number) =>
   `/frames3/frame_${String(n).padStart(5, "0")}.webp`;
