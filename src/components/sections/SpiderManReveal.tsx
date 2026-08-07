@@ -10,8 +10,8 @@ import {
 } from "@/lib/spiderman";
 
 const PARALLEL_FRAME_LOADS = 6;
-const INITIAL_LOOK_AHEAD = 16;
-const MAX_LOOK_AHEAD = 28;
+const INITIAL_LOOK_AHEAD = 18;
+const MAX_LOOK_AHEAD = 32;
 const LOOK_BEHIND = 6;
 const CACHE_BUFFER = 8;
 const CANCEL_LOADS_AFTER_JUMP = 8;
@@ -196,7 +196,7 @@ export function SpiderManReveal() {
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) startLoading();
       },
-      { rootMargin: "300% 0px" },
+      { rootMargin: "400% 0px" },
     );
     if (section) observer.observe(section);
 
@@ -226,7 +226,7 @@ export function SpiderManReveal() {
     contextRef.current = context;
 
     context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "medium";
+    context.imageSmoothingQuality = "high";
 
     const imageRatio = image.naturalWidth / image.naturalHeight;
     const canvasRatio = canvas.width / canvas.height;
@@ -402,6 +402,8 @@ export function SpiderManReveal() {
       >
         <canvas
           ref={canvasRef}
+          aria-label="Animated Spider-Man cinematic sequence"
+          role="img"
           className="absolute inset-0 h-full w-full"
           style={{ willChange: "contents", transform: "translateZ(0)" }}
         />

@@ -56,8 +56,10 @@ body {
 
 .spider-vignette {
   background:
-    linear-gradient(90deg, rgba(6, 8, 12, 0.76) 0%, transparent 34%, transparent 68%, rgba(6, 8, 12, 0.5) 100%),
-    radial-gradient(120% 85% at 50% 50%, transparent 34%, rgba(6, 8, 12, 0.35) 70%, rgba(6, 8, 12, 0.82) 100%);
+    radial-gradient(55% 70% at 82% 24%, rgba(239, 51, 64, 0.12), transparent 72%),
+    linear-gradient(90deg, rgba(6, 8, 12, 0.78) 0%, transparent 36%, transparent 68%, rgba(6, 8, 12, 0.52) 100%),
+    linear-gradient(180deg, rgba(6, 8, 12, 0.18) 0%, transparent 42%, rgba(6, 8, 12, 0.48) 100%),
+    radial-gradient(120% 85% at 50% 50%, transparent 34%, rgba(6, 8, 12, 0.35) 70%, rgba(6, 8, 12, 0.84) 100%);
 }
 
 @media (max-width: 1024px) {

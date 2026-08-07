@@ -1,4 +1,7 @@
-export const SPIDER_FRAME_COUNT = 644;
+// Keep this in sync with the optimized sequence in public/frames3.
+// The sequence is intentionally shorter so the browser never requests missing
+// frames and can keep the animation responsive on slower connections.
+export const SPIDER_FRAME_COUNT = 212;
 
 export const spiderFramePath = (n: number) =>
   `/frames3/frame_${String(n).padStart(5, "0")}.webp`;
