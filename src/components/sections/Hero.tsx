@@ -5,12 +5,13 @@ import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
 import { DIALOGUES, FRAME_COUNT, HERO_TEXT_FADE_END, framePath } from "@/lib/hero";
 
-const INITIAL_READY_FRAMES = 12;
-const FRAME_LOOK_AHEAD = 20;
-const FRAME_LOOK_BEHIND = 5;
-const MAX_CACHED_FRAMES = 32;
-const PARALLEL_LOADS = 4;
-const MAX_CANVAS_PIXELS = 1600 * 900;
+const INITIAL_READY_FRAMES = 8;
+const FRAME_LOOK_AHEAD = 12;
+const FRAME_LOOK_BEHIND = 4;
+const MAX_CACHED_FRAMES = 24;
+const PARALLEL_LOADS = 3;
+const FRAME_STEP = 2;
+const MAX_CANVAS_PIXELS = 1280 * 720;
 
 export function Hero() {
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -104,6 +105,13 @@ export function Hero() {
           if (cancelled) return;
           frameState[index] = 3;
           if (index < INITIAL_READY_FRAMES) initialReadyCount += 1;
+          if (!loadedRef.current) {
+            setLoadProgress(Math.min(1, initialReadyCount / INITIAL_READY_FRAMES));
+            if (frameState[0] === 2 && initialReadyCount >= INITIAL_READY_FRAMES) {
+              loadedRef.current = true;
+              setLoaded(true);
+            }
+          }
           pumpQueue();
         };
         img.src = framePath(index + 1);
@@ -114,10 +122,10 @@ export function Hero() {
       const travelDirection = direction < 0 ? -1 : 1;
       const desired: number[] = [index];
       for (let distance = 1; distance <= FRAME_LOOK_AHEAD; distance += 1) {
-        const ahead = index + distance * travelDirection;
+        const ahead = index + distance * FRAME_STEP * travelDirection;
         if (ahead >= 0 && ahead < FRAME_COUNT) desired.push(ahead);
         if (distance <= FRAME_LOOK_BEHIND) {
-          const behind = index - distance * travelDirection;
+          const behind = index - distance * FRAME_STEP * travelDirection;
           if (behind >= 0 && behind < FRAME_COUNT) desired.push(behind);
         }
       }
@@ -255,9 +263,13 @@ export function Hero() {
             ? 0
             : Math.min(1, Math.max(0, -rect.top / scrollable));
 
-        const frameIndex = Math.min(
+        const rawFrame = Math.min(
           FRAME_COUNT - 1,
           Math.floor(progress * FRAME_COUNT),
+        );
+        const frameIndex = Math.min(
+          FRAME_COUNT - 1,
+          Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
         );
         const previousFrame = targetFrameRef.current;
         targetFrameRef.current = frameIndex;

@@ -5,7 +5,13 @@ import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
 import { BEATS, CINE_FRAME_COUNT, cineFramePath } from "@/lib/cinematic";
 
-const MAX_CANVAS_PIXELS = 1600 * 900;
+const INITIAL_READY_FRAMES = 6;
+const FRAME_LOOK_AHEAD = 10;
+const FRAME_LOOK_BEHIND = 3;
+const MAX_CACHED_FRAMES = 22;
+const PARALLEL_LOADS = 3;
+const FRAME_STEP = 2;
+const MAX_CANVAS_PIXELS = 1280 * 720;
 
 export function CinematicReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -20,6 +26,8 @@ export function CinematicReveal() {
   const framesRef = useRef<HTMLImageElement[]>([]);
   const frameReadyRef = useRef<boolean[]>([]);
   const drawFrameRef = useRef<(index: number) => void>(() => undefined);
+  const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
+  const loadingStartedRef = useRef(false);
   const tickingRef = useRef(false);
   const loadedRef = useRef(false);
   const lastFrameRef = useRef(-1);
@@ -32,44 +40,108 @@ export function CinematicReveal() {
 
   useEffect(() => {
     let cancelled = false;
-    let loadedCount = 0;
-    let nextFrame = 0;
-    let started = false;
+    let activeLoads = 0;
+    let queue: number[] = [];
+    let initialReadyCount = 0;
     const imgs = new Array<HTMLImageElement>(CINE_FRAME_COUNT);
+    const frameState = new Array<0 | 1 | 2 | 3>(CINE_FRAME_COUNT).fill(0);
     frameReadyRef.current = new Array<boolean>(CINE_FRAME_COUNT).fill(false);
     framesRef.current = imgs;
 
-    const loadNext = () => {
-      if (cancelled || nextFrame >= CINE_FRAME_COUNT) return;
-      const index = nextFrame++;
-      const img = new Image();
-      img.decoding = "async";
-      img.fetchPriority = index === 0 ? "high" : "auto";
-      imgs[index] = img;
-      img.onload = () => {
-        if (cancelled) return;
-        frameReadyRef.current[index] = true;
-        loadedCount++;
-        if (!loadedRef.current) setLoadProgress(Math.min(1, loadedCount / 8));
-        if (index === 0) {
-          loadedRef.current = true;
-          setLoaded(true);
+    const evictDistantFrames = () => {
+      const ready: number[] = [];
+      for (let index = 0; index < CINE_FRAME_COUNT; index += 1) {
+        if (frameState[index] === 2) ready.push(index);
+      }
+      if (ready.length <= MAX_CACHED_FRAMES) return;
+      ready.sort(
+        (a, b) =>
+          Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current),
+      );
+      for (let i = 0; i < ready.length - MAX_CACHED_FRAMES; i += 1) {
+        const index = ready[i];
+        if (index === lastFrameRef.current || index === targetFrameRef.current) continue;
+        const image = imgs[index];
+        if (image) {
+          image.onload = null;
+          image.onerror = null;
+          image.src = "";
         }
-        if (index === targetFrameRef.current) drawFrameRef.current(index);
-        loadNext();
-      };
-      img.onerror = () => {
-        if (cancelled) return;
-        loadedCount++;
-        loadNext();
-      };
-      img.src = cineFramePath(index + 1);
+        frameState[index] = 0;
+        frameReadyRef.current[index] = false;
+      }
     };
 
+    const pumpQueue = () => {
+      while (!cancelled && activeLoads < PARALLEL_LOADS && queue.length > 0) {
+        const index = queue.shift();
+        if (index === undefined || frameState[index] !== 0) continue;
+        const img = new Image();
+        activeLoads += 1;
+        frameState[index] = 1;
+        img.decoding = "async";
+        img.fetchPriority = index === 0 ? "high" : "auto";
+        imgs[index] = img;
+        img.onload = () => {
+          activeLoads -= 1;
+          if (cancelled) return;
+          frameState[index] = 2;
+          frameReadyRef.current[index] = true;
+          if (index < INITIAL_READY_FRAMES) initialReadyCount += 1;
+          if (!loadedRef.current) {
+            setLoadProgress(Math.min(1, initialReadyCount / INITIAL_READY_FRAMES));
+            if (frameState[0] === 2 && initialReadyCount >= INITIAL_READY_FRAMES) {
+              loadedRef.current = true;
+              setLoaded(true);
+            }
+          }
+          if (Math.abs(index - targetFrameRef.current) <= 1) {
+            drawFrameRef.current(targetFrameRef.current);
+          }
+          evictDistantFrames();
+          pumpQueue();
+        };
+        img.onerror = () => {
+          activeLoads -= 1;
+          if (cancelled) return;
+          frameState[index] = 3;
+          if (index < INITIAL_READY_FRAMES) initialReadyCount += 1;
+          if (!loadedRef.current) {
+            setLoadProgress(Math.min(1, initialReadyCount / INITIAL_READY_FRAMES));
+            if (frameState[0] === 2 && initialReadyCount >= INITIAL_READY_FRAMES) {
+              loadedRef.current = true;
+              setLoaded(true);
+            }
+          }
+          pumpQueue();
+        };
+        img.src = cineFramePath(index + 1);
+      }
+    };
+
+    const ensureFrames = (index: number, direction: number) => {
+      const travelDirection = direction < 0 ? -1 : 1;
+      const desired: number[] = [index];
+      for (let distance = 1; distance <= FRAME_LOOK_AHEAD; distance += 1) {
+        const ahead = index + distance * FRAME_STEP * travelDirection;
+        if (ahead >= 0 && ahead < CINE_FRAME_COUNT) desired.push(ahead);
+        if (distance <= FRAME_LOOK_BEHIND) {
+          const behind = index - distance * FRAME_STEP * travelDirection;
+          if (behind >= 0 && behind < CINE_FRAME_COUNT) desired.push(behind);
+        }
+      }
+      if (!loadedRef.current) {
+        for (let frame = 0; frame < INITIAL_READY_FRAMES; frame += 1) desired.push(frame);
+      }
+      queue = [...new Set(desired)].filter((frame) => frameState[frame] === 0);
+      pumpQueue();
+    };
+    ensureFramesRef.current = ensureFrames;
+
     const startLoading = () => {
-      if (started || cancelled) return;
-      started = true;
-      for (let worker = 0; worker < 4; worker += 1) loadNext();
+      if (loadingStartedRef.current || cancelled) return;
+      loadingStartedRef.current = true;
+      ensureFrames(targetFrameRef.current, 1);
     };
 
     const section = sectionRef.current;
@@ -83,6 +155,8 @@ export function CinematicReveal() {
 
     return () => {
       cancelled = true;
+      loadingStartedRef.current = false;
+      ensureFramesRef.current = () => undefined;
       observer.disconnect();
       for (const image of imgs) {
         if (image) {
@@ -203,11 +277,19 @@ export function CinematicReveal() {
             ? 0
             : Math.min(1, Math.max(0, -rect.top / scrollable));
 
-        const frameIndex = Math.min(
+        const rawFrame = Math.min(
           CINE_FRAME_COUNT - 1,
           Math.floor(progress * CINE_FRAME_COUNT),
         );
+        const frameIndex = Math.min(
+          CINE_FRAME_COUNT - 1,
+          Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
+        );
+        const previousFrame = targetFrameRef.current;
         targetFrameRef.current = frameIndex;
+        if (loadingStartedRef.current) {
+          ensureFramesRef.current(frameIndex, Math.sign(frameIndex - previousFrame));
+        }
         if (frameIndex !== lastFrameRef.current) {
           drawFrame(frameIndex);
         }

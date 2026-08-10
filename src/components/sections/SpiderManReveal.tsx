@@ -9,14 +9,14 @@ import {
   spiderFramePath,
 } from "@/lib/spiderman";
 
-const PARALLEL_FRAME_LOADS = 4;
-const INITIAL_LOOK_AHEAD = 10;
-const MAX_LOOK_AHEAD = 14;
-const LOOK_BEHIND = 4;
+const PARALLEL_FRAME_LOADS = 3;
+const INITIAL_LOOK_AHEAD = 8;
+const MAX_LOOK_AHEAD = 10;
+const LOOK_BEHIND = 3;
 const CACHE_BUFFER = 4;
 const CANCEL_LOADS_AFTER_JUMP = 12;
 const NEAREST_FRAME_SEARCH = 16;
-const MAX_CANVAS_PIXELS = 1280 * 720;
+const MAX_CANVAS_PIXELS = 1152 * 648;
 const SCROLL_PIXELS_PER_FRAME = 9;
 const FRAME_STEP = 2;
 const INITIAL_READY_FRAMES = 6;
@@ -50,6 +50,7 @@ export function SpiderManReveal() {
     let cancelled = false;
     let activeLoads = 0;
     let queue: number[] = [];
+    let initialSettledCount = 0;
     let protectedFrames = new Set<number>();
     let lastRequestedFrame = 0;
     const images = new Array<HTMLImageElement | undefined>(SPIDER_FRAME_COUNT);
@@ -106,10 +107,12 @@ export function SpiderManReveal() {
           frameReadyRef.current[index] = true;
 
           if (!loadedRef.current) {
-            const readyNearby = [...protectedFrames].filter((frame) => frameState[frame] === 2).length;
-            setLoadProgress(Math.min(1, readyNearby / INITIAL_READY_FRAMES));
+            if (index < INITIAL_READY_FRAMES * FRAME_STEP && index % FRAME_STEP === 0) {
+              initialSettledCount += 1;
+            }
+            setLoadProgress(Math.min(1, initialSettledCount / INITIAL_READY_FRAMES));
 
-            if (frameState[0] === 2 && readyNearby >= INITIAL_READY_FRAMES) {
+            if (frameState[0] === 2 && initialSettledCount >= INITIAL_READY_FRAMES) {
               loadedRef.current = true;
               setLoaded(true);
             }
@@ -127,6 +130,18 @@ export function SpiderManReveal() {
           activeLoads -= 1;
           if (cancelled) return;
           frameState[index] = 3;
+          if (
+            !loadedRef.current &&
+            index < INITIAL_READY_FRAMES * FRAME_STEP &&
+            index % FRAME_STEP === 0
+          ) {
+            initialSettledCount += 1;
+            setLoadProgress(Math.min(1, initialSettledCount / INITIAL_READY_FRAMES));
+            if (frameState[0] === 2 && initialSettledCount >= INITIAL_READY_FRAMES) {
+              loadedRef.current = true;
+              setLoaded(true);
+            }
+          }
           pumpQueue();
         };
         image.src = spiderFramePath(index + 1);
@@ -198,7 +213,7 @@ export function SpiderManReveal() {
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) startLoading();
       },
-      { rootMargin: "400% 0px" },
+      { rootMargin: "150% 0px" },
     );
     if (section) observer.observe(section);
 
