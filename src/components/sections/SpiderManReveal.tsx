@@ -9,17 +9,28 @@ import {
   spiderFramePath,
 } from "@/lib/spiderman";
 
-const PARALLEL_FRAME_LOADS = 3;
+const PARALLEL_FRAME_LOADS = 4;
 const INITIAL_LOOK_AHEAD = 8;
-const MAX_LOOK_AHEAD = 10;
-const LOOK_BEHIND = 3;
+const MAX_LOOK_AHEAD = 12;
+const LOOK_BEHIND = 4;
 const CACHE_BUFFER = 4;
-const CANCEL_LOADS_AFTER_JUMP = 12;
+const CANCEL_LOADS_AFTER_JUMP = 8;
 const NEAREST_FRAME_SEARCH = 16;
-const MAX_CANVAS_PIXELS = 1152 * 648;
+const MAX_CANVAS_PIXELS = 1280 * 720;
 const SCROLL_PIXELS_PER_FRAME = 9;
-const FRAME_STEP = 2;
-const INITIAL_READY_FRAMES = 6;
+const FRAME_STEP = 1;
+const ANCHOR_INTERVAL = 5;
+const BITMAP_WIDTH = 960;
+const BITMAP_HEIGHT = 540;
+const ANCHOR_FRAMES = Array.from(
+  { length: Math.ceil(SPIDER_FRAME_COUNT / ANCHOR_INTERVAL) },
+  (_, index) => Math.min(index * ANCHOR_INTERVAL, SPIDER_FRAME_COUNT - 1),
+);
+
+type SpiderFrame = HTMLImageElement | ImageBitmap;
+
+const isImageBitmap = (frame: SpiderFrame | undefined): frame is ImageBitmap =>
+  typeof ImageBitmap !== "undefined" && frame instanceof ImageBitmap;
 
 export function SpiderManReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -29,7 +40,7 @@ export function SpiderManReveal() {
   const outroRef = useRef<HTMLDivElement | null>(null);
   const progressRef = useRef<HTMLDivElement | null>(null);
   const sequenceRef = useRef<HTMLSpanElement | null>(null);
-  const framesRef = useRef<Array<HTMLImageElement | undefined>>([]);
+  const framesRef = useRef<Array<SpiderFrame | undefined>>([]);
   const frameReadyRef = useRef<boolean[]>([]);
   const renderFrameRef = useRef<() => void>(() => undefined);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
@@ -38,7 +49,7 @@ export function SpiderManReveal() {
   const scrollTickingRef = useRef(false);
   const renderTickingRef = useRef(false);
   const lastFrameRef = useRef(-1);
-  const lastImageRef = useRef<HTMLImageElement | null>(null);
+  const lastImageRef = useRef<SpiderFrame | null>(null);
   const targetFrameRef = useRef(0);
   const previousBeatsRef = useRef("");
 
@@ -50,10 +61,10 @@ export function SpiderManReveal() {
     let cancelled = false;
     let activeLoads = 0;
     let queue: number[] = [];
-    let initialSettledCount = 0;
+    const settledAnchors = new Set<number>();
     let protectedFrames = new Set<number>();
     let lastRequestedFrame = 0;
-    const images = new Array<HTMLImageElement | undefined>(SPIDER_FRAME_COUNT);
+    const images = new Array<SpiderFrame | undefined>(SPIDER_FRAME_COUNT);
     const activeImages = new Map<number, HTMLImageElement>();
     const frameState = new Array<0 | 1 | 2 | 3>(SPIDER_FRAME_COUNT).fill(0);
     frameReadyRef.current = new Array<boolean>(SPIDER_FRAME_COUNT).fill(false);
@@ -71,12 +82,14 @@ export function SpiderManReveal() {
       let removeCount = readyFrames.length - cacheSize;
       for (const index of readyFrames) {
         if (removeCount <= 0) break;
-        if (protectedFrames.has(index)) continue;
-        const image = images[index];
-        if (image) {
-          image.onload = null;
-          image.onerror = null;
-          image.src = "";
+        if (protectedFrames.has(index) || ANCHOR_FRAMES.includes(index)) continue;
+        const drawable = images[index];
+        if (isImageBitmap(drawable)) {
+          drawable.close();
+        } else if (drawable instanceof HTMLImageElement) {
+          drawable.onload = null;
+          drawable.onerror = null;
+          drawable.src = "";
         }
         images[index] = undefined;
         frameState[index] = 0;
@@ -98,21 +111,38 @@ export function SpiderManReveal() {
         images[index] = image;
         activeImages.set(index, image);
 
-        image.onload = () => {
+        image.onload = async () => {
           if (activeImages.get(index) !== image) return;
+          let drawable: SpiderFrame = image;
+          try {
+            if (typeof createImageBitmap === "function") drawable = await createImageBitmap(image, {
+              resizeWidth: BITMAP_WIDTH,
+              resizeHeight: BITMAP_HEIGHT,
+              resizeQuality: "medium",
+            });
+          } catch {
+            // Keep the image fallback for browsers without ImageBitmap support.
+          }
+          if (activeImages.get(index) !== image) {
+            if (isImageBitmap(drawable)) drawable.close();
+            return;
+          }
           activeImages.delete(index);
           activeLoads -= 1;
           if (cancelled) return;
+          images[index] = drawable;
+          if (drawable !== image) {
+            image.onload = null;
+            image.onerror = null;
+            image.src = "";
+          }
           frameState[index] = 2;
           frameReadyRef.current[index] = true;
 
-          if (!loadedRef.current) {
-            if (index < INITIAL_READY_FRAMES * FRAME_STEP && index % FRAME_STEP === 0) {
-              initialSettledCount += 1;
-            }
-            setLoadProgress(Math.min(1, initialSettledCount / INITIAL_READY_FRAMES));
-
-            if (frameState[0] === 2 && initialSettledCount >= INITIAL_READY_FRAMES) {
+          if (!loadedRef.current && ANCHOR_FRAMES.includes(index)) {
+            settledAnchors.add(index);
+            setLoadProgress(settledAnchors.size / ANCHOR_FRAMES.length);
+            if (frameState[0] === 2 && settledAnchors.size >= ANCHOR_FRAMES.length) {
               loadedRef.current = true;
               setLoaded(true);
             }
@@ -130,14 +160,10 @@ export function SpiderManReveal() {
           activeLoads -= 1;
           if (cancelled) return;
           frameState[index] = 3;
-          if (
-            !loadedRef.current &&
-            index < INITIAL_READY_FRAMES * FRAME_STEP &&
-            index % FRAME_STEP === 0
-          ) {
-            initialSettledCount += 1;
-            setLoadProgress(Math.min(1, initialSettledCount / INITIAL_READY_FRAMES));
-            if (frameState[0] === 2 && initialSettledCount >= INITIAL_READY_FRAMES) {
+          if (!loadedRef.current && ANCHOR_FRAMES.includes(index)) {
+            settledAnchors.add(index);
+            setLoadProgress(settledAnchors.size / ANCHOR_FRAMES.length);
+            if (frameState[0] === 2 && settledAnchors.size >= ANCHOR_FRAMES.length) {
               loadedRef.current = true;
               setLoaded(true);
             }
@@ -167,7 +193,7 @@ export function SpiderManReveal() {
         }
       }
 
-      protectedFrames = new Set(desired);
+      protectedFrames = new Set([...ANCHOR_FRAMES, ...desired]);
       if (lastFrameRef.current >= 0) protectedFrames.add(lastFrameRef.current);
 
       // Old in-flight requests used to occupy every connection after a fast
@@ -196,7 +222,10 @@ export function SpiderManReveal() {
         }
       }
 
-      queue = desired.filter((frame) => frameState[frame] === 0);
+      queue = [...desired, ...ANCHOR_FRAMES].filter(
+        (frame, position, frames) =>
+          frames.indexOf(frame) === position && frameState[frame] === 0,
+      );
       pumpQueue();
       evictDistantFrames(desired.length + CACHE_BUFFER);
     };
@@ -205,7 +234,9 @@ export function SpiderManReveal() {
     const startLoading = () => {
       if (loadingStartedRef.current || cancelled) return;
       loadingStartedRef.current = true;
-      ensureFrames(targetFrameRef.current, 1);
+      protectedFrames = new Set(ANCHOR_FRAMES);
+      queue = ANCHOR_FRAMES.filter((frame) => frameState[frame] === 0);
+      pumpQueue();
     };
 
     const section = sectionRef.current;
@@ -213,7 +244,7 @@ export function SpiderManReveal() {
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) startLoading();
       },
-      { rootMargin: "150% 0px" },
+      { rootMargin: "100% 0px" },
     );
     if (section) observer.observe(section);
 
@@ -222,17 +253,19 @@ export function SpiderManReveal() {
       ensureFramesRef.current = () => undefined;
       loadingStartedRef.current = false;
       observer.disconnect();
-      for (const image of images) {
-        if (image) {
-          image.onload = null;
-          image.onerror = null;
-          image.src = "";
+      for (const drawable of images) {
+        if (isImageBitmap(drawable)) {
+          drawable.close();
+        } else if (drawable instanceof HTMLImageElement) {
+          drawable.onload = null;
+          drawable.onerror = null;
+          drawable.src = "";
         }
       }
     };
   }, []);
 
-  const drawImage = useCallback((image: HTMLImageElement) => {
+  const drawImage = useCallback((image: SpiderFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = contextRef.current ?? canvas.getContext("2d", {
@@ -245,7 +278,13 @@ export function SpiderManReveal() {
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "medium";
 
-    const imageRatio = image.naturalWidth / image.naturalHeight;
+    const sourceWidth = image instanceof HTMLImageElement
+      ? image.naturalWidth
+      : image.width;
+    const sourceHeight = image instanceof HTMLImageElement
+      ? image.naturalHeight
+      : image.height;
+    const imageRatio = sourceWidth / sourceHeight;
     const canvasRatio = canvas.width / canvas.height;
     let width: number;
     let height: number;
@@ -292,7 +331,7 @@ export function SpiderManReveal() {
       const image = frameReadyRef.current[drawableFrame]
         ? framesRef.current[drawableFrame]
         : lastImageRef.current;
-      if (!image?.complete || !image.naturalWidth) return;
+      if (!image) return;
 
       drawImage(image);
       if (
