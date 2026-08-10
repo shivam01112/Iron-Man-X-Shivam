@@ -26,6 +26,18 @@ export default function RootLayout({
           href="/frames/frame_0001.jpg"
           fetchPriority="high"
         />
+        <link
+          rel="preload"
+          as="image"
+          href="/frames/frame_0002.jpg"
+          fetchPriority="high"
+        />
+        <link
+          rel="preload"
+          as="image"
+          href="/frames/frame_0003.jpg"
+          fetchPriority="low"
+        />
       </head>
       <body className="relative min-h-full bg-background text-foreground grain">
         <SmoothScrollProvider>{children}</SmoothScrollProvider>

@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
+import { useLenisScroll } from "@/hooks/useLenisScroll";
 import { DIALOGUES, FRAME_COUNT, HERO_TEXT_FADE_END, framePath } from "@/lib/hero";
+import { updateBeatVisibility } from "@/lib/scrollBeats";
 
 const INITIAL_READY_FRAMES = 12;
 const FRAME_LOOK_AHEAD = 20;
@@ -24,16 +26,14 @@ export function Hero() {
   const framesRef = useRef<HTMLImageElement[]>([]);
   const frameReadyRef = useRef<boolean[]>([]);
   const drawFrameRef = useRef<(index: number) => void>(() => undefined);
-  const tickingRef = useRef(false);
   const loadedRef = useRef(false);
   const lastFrameRef = useRef(-1);
   const targetFrameRef = useRef(0);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
-  const prevVisibleIdsRef = useRef("");
+  const beatElementsRef = useRef<Map<string, HTMLElement>>(new Map());
 
   const [loadProgress, setLoadProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [visibleCards, setVisibleCards] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -237,84 +237,72 @@ export function Hero() {
     lastFrameRef.current = 0;
   }, [loaded, drawFrame]);
 
-  useEffect(() => {
-    const handleScroll = () => {
-      if (tickingRef.current) return;
-      tickingRef.current = true;
+  const handleScroll = useCallback(() => {
+    const section = sectionRef.current;
+    if (!section) return;
 
-      requestAnimationFrame(() => {
-        tickingRef.current = false;
-        const section = sectionRef.current;
-        if (!section) return;
+    const rect = section.getBoundingClientRect();
+    if (rect.top > window.innerHeight || rect.bottom < 0) return;
+    const scrollable = section.offsetHeight - window.innerHeight;
+    const progress =
+      scrollable <= 0
+        ? 0
+        : Math.min(1, Math.max(0, -rect.top / scrollable));
 
-        const rect = section.getBoundingClientRect();
-        if (rect.top > window.innerHeight || rect.bottom < 0) return;
-        const scrollable = section.offsetHeight - window.innerHeight;
-        const progress =
-          scrollable <= 0
-            ? 0
-            : Math.min(1, Math.max(0, -rect.top / scrollable));
+    const frameIndex = Math.min(
+      FRAME_COUNT - 1,
+      Math.floor(progress * FRAME_COUNT),
+    );
+    const previousFrame = targetFrameRef.current;
+    targetFrameRef.current = frameIndex;
+    ensureFramesRef.current(frameIndex, Math.sign(frameIndex - previousFrame));
+    if (loadedRef.current && frameIndex !== lastFrameRef.current) {
+      drawFrame(frameIndex);
+    }
 
-        const frameIndex = Math.min(
-          FRAME_COUNT - 1,
-          Math.floor(progress * FRAME_COUNT),
-        );
-        const previousFrame = targetFrameRef.current;
-        targetFrameRef.current = frameIndex;
-        ensureFramesRef.current(frameIndex, Math.sign(frameIndex - previousFrame));
-        if (!loadedRef.current) return;
-        if (frameIndex !== lastFrameRef.current) {
-          drawFrame(frameIndex);
-        }
+    if (heroTextRef.current) {
+      const opacity = Math.max(0, 1 - progress / HERO_TEXT_FADE_END);
+      heroTextRef.current.style.opacity = String(opacity);
+      heroTextRef.current.style.transform = `translate3d(0, ${(1 - opacity) * 12}px, 0)`;
+    }
 
-        if (heroTextRef.current) {
-          const opacity = Math.max(0, 1 - progress / HERO_TEXT_FADE_END);
-          heroTextRef.current.style.opacity = String(opacity);
-          heroTextRef.current.style.transform = `translateY(${(1 - opacity) * 12}px)`;
-        }
+    if (bigLeftTextRef.current) {
+      const op = Math.min(1, Math.max(0, (progress - 0.1) / 0.08));
+      bigLeftTextRef.current.style.opacity = String(op);
+      bigLeftTextRef.current.style.transform = `translate3d(0, ${(1 - op) * 14}px, 0)`;
+    }
 
-        if (bigLeftTextRef.current) {
-          const op = Math.min(1, Math.max(0, (progress - 0.1) / 0.08));
-          bigLeftTextRef.current.style.opacity = String(op);
-          bigLeftTextRef.current.style.transform = `translateY(${(1 - op) * 14}px)`;
-        }
+    if (progressFillRef.current) {
+      progressFillRef.current.style.transform = `scaleX(${progress})`;
+    }
 
-        if (progressFillRef.current) {
-          progressFillRef.current.style.transform = `scaleX(${progress})`;
-        }
+    if (powerReadoutRef.current) {
+      const pwr = 87.3 + Math.sin(progress * Math.PI * 2) * 6.7;
+      powerReadoutRef.current.textContent = pwr.toFixed(1) + "%";
+    }
 
-        if (powerReadoutRef.current) {
-          const pwr = 87.3 + Math.sin(progress * Math.PI * 2) * 6.7;
-          powerReadoutRef.current.textContent = pwr.toFixed(1) + "%";
-        }
-
-        const newVisible = new Set<string>();
-        for (const d of DIALOGUES) {
-          if (progress >= d.show && progress <= d.hide) newVisible.add(d.id);
-        }
-        const newIds = [...newVisible].sort().join(",");
-        if (newIds !== prevVisibleIdsRef.current) {
-          prevVisibleIdsRef.current = newIds;
-          setVisibleCards(newVisible);
-        }
-      });
-    };
-
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    handleScroll();
-    return () => window.removeEventListener("scroll", handleScroll);
+    updateBeatVisibility(beatElementsRef.current, DIALOGUES, progress);
+    for (const dialogue of DIALOGUES) {
+      const mobileElement = beatElementsRef.current.get(`${dialogue.id}-mobile`);
+      if (!mobileElement) continue;
+      const visible =
+        progress >= dialogue.show && progress <= dialogue.hide;
+      mobileElement.classList.toggle("is-visible", visible);
+    }
   }, [drawFrame]);
+
+  useLenisScroll(handleScroll, [handleScroll]);
 
   return (
     <section ref={sectionRef} className="scroll-animation relative">
       <div
         className="sticky top-0 min-h-[100dvh] w-full overflow-hidden bg-background"
-        style={{ height: "100dvh", willChange: "transform", transform: "translateZ(0)" }}
+        style={{ height: "100dvh", transform: "translateZ(0)" }}
       >
         <canvas
           ref={canvasRef}
           className="absolute inset-0 h-full w-full"
-          style={{ transform: "translateZ(0)" }}
+          style={{ transform: "translateZ(0)", contain: "strict" }}
         />
 
         <div
@@ -341,7 +329,6 @@ export function Hero() {
         <div
           ref={heroTextRef}
           className="absolute inset-x-0 bottom-0 z-10 flex flex-col items-start gap-5 px-6 pb-24 md:px-12 md:pb-28"
-          style={{ transition: "opacity 80ms linear" }}
         >
           <EyebrowBadge>IRON MAN // SHIVAM // ONLINE</EyebrowBadge>
           <h1 className="max-w-[14ch] font-sans text-5xl font-semibold leading-[0.95] tracking-tighter text-foreground md:text-7xl lg:text-8xl">
@@ -358,7 +345,7 @@ export function Hero() {
         <div
           ref={bigLeftTextRef}
           className="pointer-events-none absolute bottom-24 left-6 z-10 hidden max-w-[58%] flex-col gap-5 md:flex md:bottom-28 md:left-12"
-          style={{ opacity: 0, transition: "opacity 80ms linear" }}
+          style={{ opacity: 0 }}
         >
           <span className="inline-flex items-center gap-2.5 font-mono text-[10px] uppercase tracking-[0.3em] text-accent">
             <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_10px_rgba(212,162,47,0.85)]" />
@@ -399,7 +386,7 @@ export function Hero() {
             <div
               ref={progressFillRef}
               className="h-full origin-left bg-accent"
-              style={{ transform: "scaleX(0)", transition: "transform 80ms linear" }}
+              style={{ transform: "scaleX(0)" }}
             />
           </div>
           <div className="mx-6 flex items-center justify-between pb-4 font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500 md:mx-10">
@@ -410,7 +397,6 @@ export function Hero() {
         </div>
 
         {DIALOGUES.map((d) => {
-          const visible = visibleCards.has(d.id);
           const position =
             d.id === "d1"
               ? "top-[22%] right-6 md:right-12"
@@ -423,9 +409,11 @@ export function Hero() {
               className={`pointer-events-none absolute ${position} z-20 hidden w-[420px] max-w-[90vw] md:block`}
             >
               <figure
-                className={`card-surface pointer-events-auto p-6 transition-all duration-400 ease-out ${
-                  visible ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0"
-                }`}
+                ref={(element) => {
+                  if (element) beatElementsRef.current.set(d.id, element);
+                  else beatElementsRef.current.delete(d.id);
+                }}
+                className="card-scroll scroll-beat pointer-events-auto p-6"
               >
                 <blockquote className="font-sans text-xl font-medium leading-snug tracking-tight text-foreground">
                   &ldquo;{d.quote}&rdquo;
@@ -442,16 +430,14 @@ export function Hero() {
         })}
 
         <div className="pointer-events-none absolute inset-x-0 top-[38%] z-20 flex flex-col gap-3 px-6 md:hidden">
-          {DIALOGUES.map((d) => {
-            const visible = visibleCards.has(d.id);
-            return (
+          {DIALOGUES.map((d) => (
               <figure
                 key={d.id}
-                className={`card-surface pointer-events-auto p-5 transition-all duration-400 ease-out ${
-                  visible
-                    ? "translate-y-0 opacity-100"
-                    : "translate-y-4 opacity-0"
-                }`}
+                ref={(element) => {
+                  if (element) beatElementsRef.current.set(`${d.id}-mobile`, element);
+                  else beatElementsRef.current.delete(`${d.id}-mobile`);
+                }}
+                className="card-scroll scroll-beat scroll-beat-sm p-5"
               >
                 <blockquote className="font-sans text-base font-medium leading-snug text-foreground">
                   &ldquo;{d.quote}&rdquo;
@@ -465,8 +451,7 @@ export function Hero() {
                   </span>
                 </figcaption>
               </figure>
-            );
-          })}
+          ))}
         </div>
 
         {!loaded && (

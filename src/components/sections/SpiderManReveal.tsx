@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
+import { useLenisScroll } from "@/hooks/useLenisScroll";
 import {
   SPIDER_BEATS,
   SPIDER_FRAME_COUNT,
   spiderFramePath,
 } from "@/lib/spiderman";
+import { updateBeatVisibility } from "@/lib/scrollBeats";
 
 const PARALLEL_FRAME_LOADS = 4;
 const INITIAL_LOOK_AHEAD = 8;
@@ -46,16 +48,13 @@ export function SpiderManReveal() {
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
   const loadingStartedRef = useRef(false);
   const loadedRef = useRef(false);
-  const scrollTickingRef = useRef(false);
-  const renderTickingRef = useRef(false);
   const lastFrameRef = useRef(-1);
   const lastImageRef = useRef<SpiderFrame | null>(null);
   const targetFrameRef = useRef(0);
-  const previousBeatsRef = useRef("");
+  const beatElementsRef = useRef<Map<string, HTMLElement>>(new Map());
 
   const [loadProgress, setLoadProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [visibleBeats, setVisibleBeats] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -307,41 +306,35 @@ export function SpiderManReveal() {
   }, []);
 
   const renderFrame = useCallback(() => {
-    if (renderTickingRef.current) return;
-    renderTickingRef.current = true;
-
-    requestAnimationFrame(() => {
-      renderTickingRef.current = false;
-      const target = targetFrameRef.current;
-      let drawableFrame = target;
-      if (!frameReadyRef.current[drawableFrame]) {
-        for (let distance = 1; distance <= NEAREST_FRAME_SEARCH; distance += 1) {
-          const before = target - distance;
-          const after = target + distance;
-          if (before >= 0 && frameReadyRef.current[before]) {
-            drawableFrame = before;
-            break;
-          }
-          if (after < SPIDER_FRAME_COUNT && frameReadyRef.current[after]) {
-            drawableFrame = after;
-            break;
-          }
+    const target = targetFrameRef.current;
+    let drawableFrame = target;
+    if (!frameReadyRef.current[drawableFrame]) {
+      for (let distance = 1; distance <= NEAREST_FRAME_SEARCH; distance += 1) {
+        const before = target - distance;
+        const after = target + distance;
+        if (before >= 0 && frameReadyRef.current[before]) {
+          drawableFrame = before;
+          break;
+        }
+        if (after < SPIDER_FRAME_COUNT && frameReadyRef.current[after]) {
+          drawableFrame = after;
+          break;
         }
       }
-      const image = frameReadyRef.current[drawableFrame]
-        ? framesRef.current[drawableFrame]
-        : lastImageRef.current;
-      if (!image) return;
+    }
+    const image = frameReadyRef.current[drawableFrame]
+      ? framesRef.current[drawableFrame]
+      : lastImageRef.current;
+    if (!image) return;
 
-      drawImage(image);
-      if (
-        frameReadyRef.current[drawableFrame] &&
-        image === framesRef.current[drawableFrame]
-      ) {
-        lastFrameRef.current = drawableFrame;
-      }
-      lastImageRef.current = image;
-    });
+    drawImage(image);
+    if (
+      frameReadyRef.current[drawableFrame] &&
+      image === framesRef.current[drawableFrame]
+    ) {
+      lastFrameRef.current = drawableFrame;
+    }
+    lastImageRef.current = image;
   }, [drawImage]);
 
   useEffect(() => {
@@ -378,74 +371,60 @@ export function SpiderManReveal() {
     renderFrame();
   }, [renderFrame, loaded]);
 
-  useEffect(() => {
-    const onScroll = () => {
-      if (scrollTickingRef.current) return;
-      scrollTickingRef.current = true;
+  const handleScroll = useCallback(() => {
+    const section = sectionRef.current;
+    if (!section) return;
 
-      requestAnimationFrame(() => {
-        scrollTickingRef.current = false;
-        const section = sectionRef.current;
-        if (!section) return;
+    const rect = section.getBoundingClientRect();
+    if (rect.top > window.innerHeight || rect.bottom < 0) return;
+    const scrollable = section.offsetHeight - window.innerHeight;
+    const progress = Math.min(1, Math.max(0, -rect.top / scrollable));
+    const rawFrame = Math.min(
+      SPIDER_FRAME_COUNT - 1,
+      Math.floor(progress * SPIDER_FRAME_COUNT),
+    );
+    const frame = Math.min(
+      SPIDER_FRAME_COUNT - 1,
+      Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
+    );
 
-        const rect = section.getBoundingClientRect();
-        if (rect.top > window.innerHeight || rect.bottom < 0) return;
-        const scrollable = section.offsetHeight - window.innerHeight;
-        const progress = Math.min(1, Math.max(0, -rect.top / scrollable));
-        const rawFrame = Math.min(
-          SPIDER_FRAME_COUNT - 1,
-          Math.floor(progress * SPIDER_FRAME_COUNT),
-        );
-        const frame = Math.min(
-          SPIDER_FRAME_COUNT - 1,
-          Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
-        );
+    const previousFrame = targetFrameRef.current;
+    const direction = Math.sign(frame - previousFrame);
+    targetFrameRef.current = frame;
+    if (!loadingStartedRef.current) return;
+    ensureFramesRef.current(frame, direction);
+    if (!loadedRef.current) return;
+    if (frame !== lastFrameRef.current) {
+      renderFrame();
+    }
 
-        const previousFrame = targetFrameRef.current;
-        const direction = Math.sign(frame - previousFrame);
-        targetFrameRef.current = frame;
-        if (!loadingStartedRef.current) return;
-        ensureFramesRef.current(frame, direction);
-        if (!loadedRef.current) return;
-        if (frame !== lastFrameRef.current) {
-          renderFrame();
-        }
+    if (introRef.current) {
+      const opacity = Math.max(0, 1 - progress / 0.14);
+      introRef.current.style.opacity = String(opacity);
+      introRef.current.style.transform = `translate3d(0, ${(1 - opacity) * 14}px, 0)`;
+    }
+    if (outroRef.current) {
+      const opacity = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
+      outroRef.current.style.opacity = String(opacity);
+      outroRef.current.style.transform = `translate3d(0, ${(1 - opacity) * 14}px, 0)`;
+    }
+    if (progressRef.current) {
+      progressRef.current.style.transform = `scaleX(${progress})`;
+    }
+    if (sequenceRef.current) {
+      sequenceRef.current.textContent = `SEQ ${String(frame + 1).padStart(3, "0")} / ${SPIDER_FRAME_COUNT}`;
+    }
 
-        if (introRef.current) {
-          const opacity = Math.max(0, 1 - progress / 0.14);
-          introRef.current.style.opacity = String(opacity);
-          introRef.current.style.transform = `translateY(${(1 - opacity) * 14}px)`;
-        }
-        if (outroRef.current) {
-          const opacity = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
-          outroRef.current.style.opacity = String(opacity);
-          outroRef.current.style.transform = `translateY(${(1 - opacity) * 14}px)`;
-        }
-        if (progressRef.current) {
-          progressRef.current.style.transform = `scaleX(${progress})`;
-        }
-        if (sequenceRef.current) {
-          sequenceRef.current.textContent = `SEQ ${String(frame + 1).padStart(3, "0")} / ${SPIDER_FRAME_COUNT}`;
-        }
-
-        const nextVisible = new Set<string>();
-        for (const beat of SPIDER_BEATS) {
-          if (progress >= beat.show && progress <= beat.hide) {
-            nextVisible.add(beat.id);
-          }
-        }
-        const ids = [...nextVisible].sort().join(",");
-        if (ids !== previousBeatsRef.current) {
-          previousBeatsRef.current = ids;
-          setVisibleBeats(nextVisible);
-        }
-      });
-    };
-
-    window.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => window.removeEventListener("scroll", onScroll);
+    updateBeatVisibility(beatElementsRef.current, SPIDER_BEATS, progress);
+    for (const beat of SPIDER_BEATS) {
+      const mobileElement = beatElementsRef.current.get(`${beat.id}-mobile`);
+      if (!mobileElement) continue;
+      const visible = progress >= beat.show && progress <= beat.hide;
+      mobileElement.classList.toggle("is-visible", visible);
+    }
   }, [renderFrame]);
+
+  useLenisScroll(handleScroll, [handleScroll]);
 
   return (
     <section
@@ -458,14 +437,14 @@ export function SpiderManReveal() {
     >
       <div
         className="sticky top-0 min-h-[100dvh] w-full overflow-hidden bg-background"
-        style={{ height: "100dvh", willChange: "transform", transform: "translateZ(0)" }}
+        style={{ height: "100dvh", transform: "translateZ(0)" }}
       >
         <canvas
           ref={canvasRef}
           aria-label="Animated Spider-Man cinematic sequence"
           role="img"
           className="absolute inset-0 h-full w-full"
-          style={{ transform: "translateZ(0)" }}
+          style={{ transform: "translateZ(0)", contain: "strict" }}
         />
 
         <div className="spider-vignette pointer-events-none absolute inset-0" />
@@ -499,7 +478,6 @@ export function SpiderManReveal() {
         <div
           ref={introRef}
           className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col items-start gap-5 px-6 pb-24 md:px-12 md:pb-28"
-          style={{ transition: "opacity 80ms linear" }}
         >
           <EyebrowBadge>SPIDER SENSE // SHIVAM // ONLINE</EyebrowBadge>
           <h2 className="max-w-[13ch] font-sans text-5xl font-semibold leading-[0.92] tracking-tighter text-foreground md:text-7xl lg:text-8xl">
@@ -513,7 +491,6 @@ export function SpiderManReveal() {
         </div>
 
         {SPIDER_BEATS.map((beat, index) => {
-          const visible = visibleBeats.has(beat.id);
           const position = index === 0
             ? "top-[22%] right-6 md:right-12"
             : index === 1
@@ -521,7 +498,13 @@ export function SpiderManReveal() {
               : "bottom-24 right-6 md:bottom-28 md:right-12";
           return (
             <div key={beat.id} className={`pointer-events-none absolute ${position} z-20 hidden w-[420px] max-w-[90vw] md:block`}>
-              <figure className={`card-surface pointer-events-auto p-6 transition-all duration-400 ease-out ${visible ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0"}`}>
+              <figure
+                ref={(element) => {
+                  if (element) beatElementsRef.current.set(beat.id, element);
+                  else beatElementsRef.current.delete(beat.id);
+                }}
+                className="card-scroll scroll-beat pointer-events-auto p-6"
+              >
                 <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">{beat.label}</span>
                 <blockquote className="mt-3 font-sans text-xl font-medium leading-snug tracking-tight text-foreground">
                   &ldquo;{beat.quote}&rdquo;
@@ -536,21 +519,25 @@ export function SpiderManReveal() {
         })}
 
         <div className="pointer-events-none absolute inset-x-0 top-[36%] z-20 flex flex-col gap-3 px-6 md:hidden">
-          {SPIDER_BEATS.map((beat) => {
-            const visible = visibleBeats.has(beat.id);
-            return (
-              <figure key={beat.id} className={`card-surface p-5 transition-all duration-400 ease-out ${visible ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"}`}>
+          {SPIDER_BEATS.map((beat) => (
+              <figure
+                key={beat.id}
+                ref={(element) => {
+                  if (element) beatElementsRef.current.set(`${beat.id}-mobile`, element);
+                  else beatElementsRef.current.delete(`${beat.id}-mobile`);
+                }}
+                className="card-scroll scroll-beat scroll-beat-sm p-5"
+              >
                 <span className="font-mono text-[9px] uppercase tracking-[0.28em] text-accent">{beat.label}</span>
                 <blockquote className="mt-2 font-sans text-base font-medium leading-snug text-foreground">&ldquo;{beat.quote}&rdquo;</blockquote>
               </figure>
-            );
-          })}
+          ))}
         </div>
 
         <div
           ref={outroRef}
           className="pointer-events-none absolute bottom-24 left-6 z-10 flex flex-col items-start gap-4 md:bottom-32 md:left-12"
-          style={{ opacity: 0, transition: "opacity 80ms linear" }}
+          style={{ opacity: 0 }}
         >
           <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">Mission — complete</span>
           <span className="rounded-full border border-white/15 bg-black/30 px-5 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.22em] text-foreground backdrop-blur-md">
@@ -560,7 +547,7 @@ export function SpiderManReveal() {
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
           <div className="mx-6 mb-3 h-px bg-white/10 md:mx-10">
-            <div ref={progressRef} className="h-full origin-left bg-accent" style={{ transform: "scaleX(0)", transition: "transform 80ms linear" }} />
+            <div ref={progressRef} className="h-full origin-left bg-accent" style={{ transform: "scaleX(0)" }} />
           </div>
           <div className="mx-6 flex items-center justify-between pb-4 font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500 md:mx-10">
             <span>SPIDER-MAN // ACTIVE</span>
