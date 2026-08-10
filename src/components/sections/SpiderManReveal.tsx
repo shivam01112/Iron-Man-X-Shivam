@@ -9,15 +9,17 @@ import {
   spiderFramePath,
 } from "@/lib/spiderman";
 
-const PARALLEL_FRAME_LOADS = 6;
-const INITIAL_LOOK_AHEAD = 18;
-const MAX_LOOK_AHEAD = 32;
-const LOOK_BEHIND = 6;
-const CACHE_BUFFER = 8;
-const CANCEL_LOADS_AFTER_JUMP = 8;
-const NEAREST_FRAME_SEARCH = 24;
-const MAX_CANVAS_PIXELS = 1920 * 1080;
+const PARALLEL_FRAME_LOADS = 4;
+const INITIAL_LOOK_AHEAD = 10;
+const MAX_LOOK_AHEAD = 14;
+const LOOK_BEHIND = 4;
+const CACHE_BUFFER = 4;
+const CANCEL_LOADS_AFTER_JUMP = 12;
+const NEAREST_FRAME_SEARCH = 16;
+const MAX_CANVAS_PIXELS = 1280 * 720;
 const SCROLL_PIXELS_PER_FRAME = 9;
+const FRAME_STEP = 2;
+const INITIAL_READY_FRAMES = 6;
 
 export function SpiderManReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -105,9 +107,9 @@ export function SpiderManReveal() {
 
           if (!loadedRef.current) {
             const readyNearby = [...protectedFrames].filter((frame) => frameState[frame] === 2).length;
-            setLoadProgress(Math.min(1, readyNearby / 8));
+            setLoadProgress(Math.min(1, readyNearby / INITIAL_READY_FRAMES));
 
-            if (index === 0 || index === targetFrameRef.current) {
+            if (frameState[0] === 2 && readyNearby >= INITIAL_READY_FRAMES) {
               loadedRef.current = true;
               setLoaded(true);
             }
@@ -140,10 +142,10 @@ export function SpiderManReveal() {
       const desired: number[] = [index];
 
       for (let distance = 1; distance <= lookAhead; distance += 1) {
-        const frame = index + distance * travelDirection;
+        const frame = index + distance * FRAME_STEP * travelDirection;
         if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
         if (distance <= LOOK_BEHIND) {
-          const trailingFrame = index - distance * travelDirection;
+          const trailingFrame = index - distance * FRAME_STEP * travelDirection;
           if (trailingFrame >= 0 && trailingFrame < SPIDER_FRAME_COUNT) {
             desired.push(trailingFrame);
           }
@@ -226,7 +228,7 @@ export function SpiderManReveal() {
     contextRef.current = context;
 
     context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
+    context.imageSmoothingQuality = "medium";
 
     const imageRatio = image.naturalWidth / image.naturalHeight;
     const canvasRatio = canvas.width / canvas.height;
@@ -336,9 +338,13 @@ export function SpiderManReveal() {
         if (rect.top > window.innerHeight || rect.bottom < 0) return;
         const scrollable = section.offsetHeight - window.innerHeight;
         const progress = Math.min(1, Math.max(0, -rect.top / scrollable));
-        const frame = Math.min(
+        const rawFrame = Math.min(
           SPIDER_FRAME_COUNT - 1,
           Math.floor(progress * SPIDER_FRAME_COUNT),
+        );
+        const frame = Math.min(
+          SPIDER_FRAME_COUNT - 1,
+          Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
         );
 
         const previousFrame = targetFrameRef.current;
@@ -405,7 +411,7 @@ export function SpiderManReveal() {
           aria-label="Animated Spider-Man cinematic sequence"
           role="img"
           className="absolute inset-0 h-full w-full"
-          style={{ willChange: "contents", transform: "translateZ(0)" }}
+          style={{ transform: "translateZ(0)" }}
         />
 
         <div className="spider-vignette pointer-events-none absolute inset-0" />

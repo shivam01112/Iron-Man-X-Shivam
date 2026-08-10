@@ -5,9 +5,17 @@ import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
 import { DIALOGUES, FRAME_COUNT, HERO_TEXT_FADE_END, framePath } from "@/lib/hero";
 
+const INITIAL_READY_FRAMES = 12;
+const FRAME_LOOK_AHEAD = 20;
+const FRAME_LOOK_BEHIND = 5;
+const MAX_CACHED_FRAMES = 32;
+const PARALLEL_LOADS = 4;
+const MAX_CANVAS_PIXELS = 1600 * 900;
+
 export function Hero() {
   const sectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const heroTextRef = useRef<HTMLDivElement | null>(null);
   const bigLeftTextRef = useRef<HTMLDivElement | null>(null);
   const progressFillRef = useRef<HTMLDivElement | null>(null);
@@ -20,6 +28,7 @@ export function Hero() {
   const loadedRef = useRef(false);
   const lastFrameRef = useRef(-1);
   const targetFrameRef = useRef(0);
+  const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
   const prevVisibleIdsRef = useRef("");
 
   const [loadProgress, setLoadProgress] = useState(0);
@@ -28,43 +37,103 @@ export function Hero() {
 
   useEffect(() => {
     let cancelled = false;
-    let loadedCount = 0;
-    let nextFrame = 0;
+    let activeLoads = 0;
+    let queue: number[] = [];
+    let initialReadyCount = 0;
     const imgs = new Array<HTMLImageElement>(FRAME_COUNT);
+    const frameState = new Array<0 | 1 | 2 | 3>(FRAME_COUNT).fill(0);
     frameReadyRef.current = new Array<boolean>(FRAME_COUNT).fill(false);
     framesRef.current = imgs;
 
-    const loadNext = () => {
-      if (cancelled || nextFrame >= FRAME_COUNT) return;
-      const index = nextFrame++;
-      const img = new Image();
-      img.decoding = "async";
-      img.fetchPriority = index === 0 ? "high" : "auto";
-      imgs[index] = img;
-      img.onload = () => {
-        if (cancelled) return;
-        frameReadyRef.current[index] = true;
-        loadedCount++;
-        if (!loadedRef.current) setLoadProgress(Math.min(1, loadedCount / 8));
-        if (index === 0) {
-          loadedRef.current = true;
-          setLoaded(true);
+    const evictDistantFrames = () => {
+      const ready: number[] = [];
+      for (let index = 0; index < FRAME_COUNT; index += 1) {
+        if (frameState[index] === 2) ready.push(index);
+      }
+      if (ready.length <= MAX_CACHED_FRAMES) return;
+      ready.sort(
+        (a, b) =>
+          Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current),
+      );
+      for (let i = 0; i < ready.length - MAX_CACHED_FRAMES; i += 1) {
+        const index = ready[i];
+        if (index === lastFrameRef.current || index === targetFrameRef.current) continue;
+        const image = imgs[index];
+        if (image) {
+          image.onload = null;
+          image.onerror = null;
+          image.src = "";
         }
-        if (index === targetFrameRef.current) drawFrameRef.current(index);
-        loadNext();
-      };
-      img.onerror = () => {
-        if (cancelled) return;
-        loadedCount++;
-        loadNext();
-      };
-      img.src = framePath(index + 1);
+        frameState[index] = 0;
+        frameReadyRef.current[index] = false;
+      }
     };
 
-    for (let worker = 0; worker < 8; worker += 1) loadNext();
+    const pumpQueue = () => {
+      while (!cancelled && activeLoads < PARALLEL_LOADS && queue.length > 0) {
+        const index = queue.shift();
+        if (index === undefined || frameState[index] !== 0) continue;
+        const img = new Image();
+        activeLoads += 1;
+        frameState[index] = 1;
+        img.decoding = "async";
+        img.fetchPriority = index < 2 ? "high" : "auto";
+        imgs[index] = img;
+        img.onload = () => {
+          activeLoads -= 1;
+          if (cancelled) return;
+          frameState[index] = 2;
+          frameReadyRef.current[index] = true;
+          if (index < INITIAL_READY_FRAMES) initialReadyCount += 1;
+          if (!loadedRef.current) {
+            const progress = initialReadyCount / INITIAL_READY_FRAMES;
+            setLoadProgress(Math.min(1, progress));
+            if (frameState[0] === 2 && initialReadyCount >= INITIAL_READY_FRAMES) {
+              loadedRef.current = true;
+              setLoaded(true);
+            }
+          }
+          if (Math.abs(index - targetFrameRef.current) <= 1) {
+            drawFrameRef.current(targetFrameRef.current);
+          }
+          evictDistantFrames();
+          pumpQueue();
+        };
+        img.onerror = () => {
+          activeLoads -= 1;
+          if (cancelled) return;
+          frameState[index] = 3;
+          if (index < INITIAL_READY_FRAMES) initialReadyCount += 1;
+          pumpQueue();
+        };
+        img.src = framePath(index + 1);
+      }
+    };
+
+    const ensureFrames = (index: number, direction: number) => {
+      const travelDirection = direction < 0 ? -1 : 1;
+      const desired: number[] = [index];
+      for (let distance = 1; distance <= FRAME_LOOK_AHEAD; distance += 1) {
+        const ahead = index + distance * travelDirection;
+        if (ahead >= 0 && ahead < FRAME_COUNT) desired.push(ahead);
+        if (distance <= FRAME_LOOK_BEHIND) {
+          const behind = index - distance * travelDirection;
+          if (behind >= 0 && behind < FRAME_COUNT) desired.push(behind);
+        }
+      }
+      if (!loadedRef.current) {
+        for (let frame = 0; frame < INITIAL_READY_FRAMES; frame += 1) desired.push(frame);
+      }
+      queue = desired.filter((frame) => frameState[frame] === 0);
+      pumpQueue();
+    };
+
+    ensureFramesRef.current = ensureFrames;
+    ensureFrames(0, 1);
 
     return () => {
       cancelled = true;
+      ensureFramesRef.current = () => undefined;
       for (const image of imgs) {
         if (image) {
           image.onload = null;
@@ -94,10 +163,14 @@ export function Hero() {
     }
     const img = framesRef.current[drawableIndex];
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = contextRef.current ?? canvas.getContext("2d", {
+      alpha: false,
+      desynchronized: true,
+    });
     if (!ctx) return;
+    contextRef.current = ctx;
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+    ctx.imageSmoothingQuality = "medium";
 
     const cw = canvas.width;
     const ch = canvas.height;
@@ -134,9 +207,17 @@ export function Hero() {
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    let renderWidth = Math.round(window.innerWidth * dpr);
+    let renderHeight = Math.round(window.innerHeight * dpr);
+    const pixelCount = renderWidth * renderHeight;
+    if (pixelCount > MAX_CANVAS_PIXELS) {
+      const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
+      renderWidth = Math.round(renderWidth * scale);
+      renderHeight = Math.round(renderHeight * scale);
+    }
+    canvas.width = renderWidth;
+    canvas.height = renderHeight;
     canvas.style.width = window.innerWidth + "px";
     canvas.style.height = window.innerHeight + "px";
     const ctx = canvas.getContext("2d");
@@ -164,7 +245,7 @@ export function Hero() {
       requestAnimationFrame(() => {
         tickingRef.current = false;
         const section = sectionRef.current;
-        if (!section || !loadedRef.current) return;
+        if (!section) return;
 
         const rect = section.getBoundingClientRect();
         if (rect.top > window.innerHeight || rect.bottom < 0) return;
@@ -178,7 +259,10 @@ export function Hero() {
           FRAME_COUNT - 1,
           Math.floor(progress * FRAME_COUNT),
         );
+        const previousFrame = targetFrameRef.current;
         targetFrameRef.current = frameIndex;
+        ensureFramesRef.current(frameIndex, Math.sign(frameIndex - previousFrame));
+        if (!loadedRef.current) return;
         if (frameIndex !== lastFrameRef.current) {
           drawFrame(frameIndex);
         }
@@ -230,7 +314,7 @@ export function Hero() {
         <canvas
           ref={canvasRef}
           className="absolute inset-0 h-full w-full"
-          style={{ willChange: "contents", transform: "translateZ(0)" }}
+          style={{ transform: "translateZ(0)" }}
         />
 
         <div

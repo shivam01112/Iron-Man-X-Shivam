@@ -5,9 +5,12 @@ import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
 import { BEATS, CINE_FRAME_COUNT, cineFramePath } from "@/lib/cinematic";
 
+const MAX_CANVAS_PIXELS = 1600 * 900;
+
 export function CinematicReveal() {
   const sectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const h2InevitableRef = useRef<HTMLHeadingElement | null>(null);
   const h2IronManRef = useRef<HTMLHeadingElement | null>(null);
   const outroRef = useRef<HTMLDivElement | null>(null);
@@ -66,7 +69,7 @@ export function CinematicReveal() {
     const startLoading = () => {
       if (started || cancelled) return;
       started = true;
-      for (let worker = 0; worker < 8; worker += 1) loadNext();
+      for (let worker = 0; worker < 4; worker += 1) loadNext();
     };
 
     const section = sectionRef.current;
@@ -74,7 +77,7 @@ export function CinematicReveal() {
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) startLoading();
       },
-      { rootMargin: "250% 0px" },
+      { rootMargin: "75% 0px" },
     );
     if (section) observer.observe(section);
 
@@ -110,10 +113,14 @@ export function CinematicReveal() {
     }
     const img = framesRef.current[drawableIndex];
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = contextRef.current ?? canvas.getContext("2d", {
+      alpha: false,
+      desynchronized: true,
+    });
     if (!ctx) return;
+    contextRef.current = ctx;
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+    ctx.imageSmoothingQuality = "medium";
 
     const cw = canvas.width;
     const ch = canvas.height;
@@ -150,9 +157,17 @@ export function CinematicReveal() {
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    let renderWidth = Math.round(window.innerWidth * dpr);
+    let renderHeight = Math.round(window.innerHeight * dpr);
+    const pixelCount = renderWidth * renderHeight;
+    if (pixelCount > MAX_CANVAS_PIXELS) {
+      const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
+      renderWidth = Math.round(renderWidth * scale);
+      renderHeight = Math.round(renderHeight * scale);
+    }
+    canvas.width = renderWidth;
+    canvas.height = renderHeight;
     canvas.style.width = window.innerWidth + "px";
     canvas.style.height = window.innerHeight + "px";
     drawFrame(lastFrameRef.current >= 0 ? lastFrameRef.current : 0);
@@ -253,7 +268,7 @@ export function CinematicReveal() {
         <canvas
           ref={canvasRef}
           className="absolute inset-0 h-full w-full"
-          style={{ willChange: "contents", transform: "translateZ(0)" }}
+          style={{ transform: "translateZ(0)" }}
         />
 
         <div
