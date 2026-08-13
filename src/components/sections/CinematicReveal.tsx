@@ -1,225 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
-import { useLenisScroll } from "@/hooks/useLenisScroll";
+import { useCanvasImageSequence } from "@/hooks/useCanvasImageSequence";
 import { BEATS, CINE_FRAME_COUNT, cineFramePath } from "@/lib/cinematic";
 import { updateBeatVisibility } from "@/lib/scrollBeats";
 
 const MAX_CANVAS_PIXELS = 1600 * 900;
 
 export function CinematicReveal() {
-  const sectionRef = useRef<HTMLElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const h2InevitableRef = useRef<HTMLHeadingElement | null>(null);
   const h2IronManRef = useRef<HTMLHeadingElement | null>(null);
   const outroRef = useRef<HTMLDivElement | null>(null);
   const progressFillRef = useRef<HTMLDivElement | null>(null);
   const seqReadoutRef = useRef<HTMLSpanElement | null>(null);
-
-  const framesRef = useRef<HTMLImageElement[]>([]);
-  const frameReadyRef = useRef<boolean[]>([]);
-  const drawFrameRef = useRef<(index: number) => void>(() => undefined);
-  const loadedRef = useRef(false);
-  const lastFrameRef = useRef(-1);
-  const targetFrameRef = useRef(0);
   const beatElementsRef = useRef<Map<string, HTMLElement>>(new Map());
 
-  const [loadProgress, setLoadProgress] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    let loadedCount = 0;
-    let nextFrame = 0;
-    let started = false;
-    const imgs = new Array<HTMLImageElement>(CINE_FRAME_COUNT);
-    frameReadyRef.current = new Array<boolean>(CINE_FRAME_COUNT).fill(false);
-    framesRef.current = imgs;
-
-    const loadNext = () => {
-      if (cancelled || nextFrame >= CINE_FRAME_COUNT) return;
-      const index = nextFrame++;
-      const img = new Image();
-      img.decoding = "async";
-      img.fetchPriority = index === 0 ? "high" : "auto";
-      imgs[index] = img;
-      img.onload = () => {
-        if (cancelled) return;
-        frameReadyRef.current[index] = true;
-        loadedCount++;
-        if (!loadedRef.current) setLoadProgress(Math.min(1, loadedCount / 8));
-        if (index === 0) {
-          loadedRef.current = true;
-          setLoaded(true);
-        }
-        if (index === targetFrameRef.current) drawFrameRef.current(index);
-        loadNext();
-      };
-      img.onerror = () => {
-        if (cancelled) return;
-        loadedCount++;
-        loadNext();
-      };
-      img.src = cineFramePath(index + 1);
-    };
-
-    const startLoading = () => {
-      if (started || cancelled) return;
-      started = true;
-      for (let worker = 0; worker < 4; worker += 1) loadNext();
-    };
-
-    const section = sectionRef.current;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) startLoading();
-      },
-      { rootMargin: "75% 0px" },
-    );
-    if (section) observer.observe(section);
-
-    return () => {
-      cancelled = true;
-      observer.disconnect();
-      for (const image of imgs) {
-        if (image) {
-          image.onload = null;
-          image.onerror = null;
-          image.src = "";
-        }
-      }
-    };
-  }, []);
-
-  const drawFrame = useCallback((index: number) => {
-    const canvas = canvasRef.current;
-    let drawableIndex = index;
-    if (!frameReadyRef.current[drawableIndex]) {
-      for (let distance = 1; distance < CINE_FRAME_COUNT; distance += 1) {
-        const before = index - distance;
-        const after = index + distance;
-        if (before >= 0 && frameReadyRef.current[before]) {
-          drawableIndex = before;
-          break;
-        }
-        if (after < CINE_FRAME_COUNT && frameReadyRef.current[after]) {
-          drawableIndex = after;
-          break;
-        }
-      }
-    }
-    const img = framesRef.current[drawableIndex];
-    if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    const ctx = contextRef.current ?? canvas.getContext("2d", {
-      alpha: false,
-      desynchronized: true,
-    });
-    if (!ctx) return;
-    contextRef.current = ctx;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "medium";
-
-    const cw = canvas.width;
-    const ch = canvas.height;
-    const imgRatio = img.naturalWidth / img.naturalHeight;
-    const canvasRatio = cw / ch;
-
-    let drawW: number;
-    let drawH: number;
-    if (canvasRatio > imgRatio) {
-      drawW = cw;
-      drawH = cw / imgRatio;
-    } else {
-      drawH = ch;
-      drawW = ch * imgRatio;
-    }
-
-    if (window.innerWidth <= 768) {
-      drawW *= 1.3;
-      drawH *= 1.3;
-    }
-
-    const drawX = (cw - drawW) / 2;
-    const drawY = (ch - drawH) / 2;
-
-    ctx.clearRect(0, 0, cw, ch);
-    ctx.drawImage(img, drawX, drawY, drawW, drawH);
-    lastFrameRef.current = drawableIndex;
-  }, []);
-
-  useEffect(() => {
-    drawFrameRef.current = drawFrame;
-  }, [drawFrame]);
-
-  const resizeCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    let renderWidth = Math.round(window.innerWidth * dpr);
-    let renderHeight = Math.round(window.innerHeight * dpr);
-    const pixelCount = renderWidth * renderHeight;
-    if (pixelCount > MAX_CANVAS_PIXELS) {
-      const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
-      renderWidth = Math.round(renderWidth * scale);
-      renderHeight = Math.round(renderHeight * scale);
-    }
-    canvas.width = renderWidth;
-    canvas.height = renderHeight;
-    canvas.style.width = window.innerWidth + "px";
-    canvas.style.height = window.innerHeight + "px";
-    drawFrame(lastFrameRef.current >= 0 ? lastFrameRef.current : 0);
-  }, [drawFrame]);
-
-  useEffect(() => {
-    resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
-    return () => window.removeEventListener("resize", resizeCanvas);
-  }, [resizeCanvas]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    drawFrame(0);
-    lastFrameRef.current = 0;
-  }, [loaded, drawFrame]);
-
-  const handleScroll = useCallback(() => {
-    const section = sectionRef.current;
-    if (!section || !loadedRef.current) return;
-
-    const rect = section.getBoundingClientRect();
-    if (rect.top > window.innerHeight || rect.bottom < 0) return;
-    const scrollable = section.offsetHeight - window.innerHeight;
-    const progress =
-      scrollable <= 0
-        ? 0
-        : Math.min(1, Math.max(0, -rect.top / scrollable));
-
-    const frameIndex = Math.min(
-      CINE_FRAME_COUNT - 1,
-      Math.floor(progress * CINE_FRAME_COUNT),
-    );
-    targetFrameRef.current = frameIndex;
-    if (frameIndex !== lastFrameRef.current) {
-      drawFrame(frameIndex);
-    }
-
+  const handleProgress = useCallback((progress: number, frameIndex: number) => {
     if (h2InevitableRef.current) {
-      const op = Math.min(1, Math.max(0, (0.52 - progress) / 0.1));
-      h2InevitableRef.current.style.opacity = String(op);
+      const opacity = Math.min(1, Math.max(0, (0.52 - progress) / 0.1));
+      h2InevitableRef.current.style.opacity = String(opacity);
     }
 
     if (h2IronManRef.current) {
-      const op = Math.min(1, Math.max(0, (progress - 0.48) / 0.1));
-      h2IronManRef.current.style.opacity = String(op);
+      const opacity = Math.min(1, Math.max(0, (progress - 0.48) / 0.1));
+      h2IronManRef.current.style.opacity = String(opacity);
     }
 
     if (outroRef.current) {
-      const op = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
-      outroRef.current.style.opacity = String(op);
-      outroRef.current.style.transform = `translate3d(0, ${(1 - op) * 14}px, 0)`;
+      const opacity = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
+      outroRef.current.style.opacity = String(opacity);
+      outroRef.current.style.transform = `translate3d(0, ${(1 - opacity) * 14}px, 0)`;
     }
 
     if (progressFillRef.current) {
@@ -227,9 +39,9 @@ export function CinematicReveal() {
     }
 
     if (seqReadoutRef.current) {
-      const n = Math.min(CINE_FRAME_COUNT, frameIndex + 1);
+      const frameNumber = Math.min(CINE_FRAME_COUNT, frameIndex + 1);
       seqReadoutRef.current.textContent =
-        `SEQ ${String(n).padStart(3, "0")} / ${CINE_FRAME_COUNT}`;
+        `SEQ ${String(frameNumber).padStart(3, "0")} / ${CINE_FRAME_COUNT}`;
     }
 
     updateBeatVisibility(beatElementsRef.current, BEATS, progress);
@@ -239,9 +51,15 @@ export function CinematicReveal() {
       const visible = progress >= beat.show && progress <= beat.hide;
       mobileElement.classList.toggle("is-visible", visible);
     }
-  }, [drawFrame]);
+  }, []);
 
-  useLenisScroll(handleScroll, [handleScroll]);
+  const { sectionRef, canvasRef, loadProgress, loaded } = useCanvasImageSequence({
+    frameCount: CINE_FRAME_COUNT,
+    framePath: cineFramePath,
+    maxCanvasPixels: MAX_CANVAS_PIXELS,
+    mobileScale: 1.3,
+    onProgress: handleProgress,
+  });
 
   return (
     <section
@@ -414,7 +232,7 @@ export function CinematicReveal() {
             Journey &mdash; complete
           </span>
           <span className="rounded-full border border-white/15 bg-white/[0.06] px-5 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.22em] text-foreground backdrop-blur-md">
-            Iron Man × Shivam
+            Iron Man &times; Shivam
           </span>
         </div>
 

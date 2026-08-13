@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
-import { useLenisScroll } from "@/hooks/useLenisScroll";
+import { useCanvasImageSequence } from "@/hooks/useCanvasImageSequence";
 import {
   SPIDER_BEATS,
   SPIDER_FRAME_COUNT,
@@ -11,393 +11,17 @@ import {
 } from "@/lib/spiderman";
 import { updateBeatVisibility } from "@/lib/scrollBeats";
 
-const PARALLEL_FRAME_LOADS = 4;
-const INITIAL_LOOK_AHEAD = 8;
-const MAX_LOOK_AHEAD = 12;
-const LOOK_BEHIND = 4;
-const CACHE_BUFFER = 4;
-const CANCEL_LOADS_AFTER_JUMP = 8;
-const NEAREST_FRAME_SEARCH = 16;
 const MAX_CANVAS_PIXELS = 1280 * 720;
 const SCROLL_PIXELS_PER_FRAME = 9;
-const FRAME_STEP = 1;
-const ANCHOR_INTERVAL = 5;
-const BITMAP_WIDTH = 960;
-const BITMAP_HEIGHT = 540;
-const ANCHOR_FRAMES = Array.from(
-  { length: Math.ceil(SPIDER_FRAME_COUNT / ANCHOR_INTERVAL) },
-  (_, index) => Math.min(index * ANCHOR_INTERVAL, SPIDER_FRAME_COUNT - 1),
-);
-
-type SpiderFrame = HTMLImageElement | ImageBitmap;
-
-const isImageBitmap = (frame: SpiderFrame | undefined): frame is ImageBitmap =>
-  typeof ImageBitmap !== "undefined" && frame instanceof ImageBitmap;
 
 export function SpiderManReveal() {
-  const sectionRef = useRef<HTMLElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const introRef = useRef<HTMLDivElement | null>(null);
   const outroRef = useRef<HTMLDivElement | null>(null);
   const progressRef = useRef<HTMLDivElement | null>(null);
   const sequenceRef = useRef<HTMLSpanElement | null>(null);
-  const framesRef = useRef<Array<SpiderFrame | undefined>>([]);
-  const frameReadyRef = useRef<boolean[]>([]);
-  const renderFrameRef = useRef<() => void>(() => undefined);
-  const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
-  const loadingStartedRef = useRef(false);
-  const loadedRef = useRef(false);
-  const lastFrameRef = useRef(-1);
-  const lastImageRef = useRef<SpiderFrame | null>(null);
-  const targetFrameRef = useRef(0);
   const beatElementsRef = useRef<Map<string, HTMLElement>>(new Map());
 
-  const [loadProgress, setLoadProgress] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    let activeLoads = 0;
-    let queue: number[] = [];
-    const settledAnchors = new Set<number>();
-    let protectedFrames = new Set<number>();
-    let lastRequestedFrame = 0;
-    const images = new Array<SpiderFrame | undefined>(SPIDER_FRAME_COUNT);
-    const activeImages = new Map<number, HTMLImageElement>();
-    const frameState = new Array<0 | 1 | 2 | 3>(SPIDER_FRAME_COUNT).fill(0);
-    frameReadyRef.current = new Array<boolean>(SPIDER_FRAME_COUNT).fill(false);
-    framesRef.current = images;
-
-    const evictDistantFrames = (cacheSize: number) => {
-      const readyFrames = frameState
-        .map((state, index) => state === 2 ? index : -1)
-        .filter((index) => index >= 0);
-      if (readyFrames.length <= cacheSize) return;
-
-      readyFrames.sort(
-        (a, b) => Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current),
-      );
-      let removeCount = readyFrames.length - cacheSize;
-      for (const index of readyFrames) {
-        if (removeCount <= 0) break;
-        if (protectedFrames.has(index) || ANCHOR_FRAMES.includes(index)) continue;
-        const drawable = images[index];
-        if (isImageBitmap(drawable)) {
-          drawable.close();
-        } else if (drawable instanceof HTMLImageElement) {
-          drawable.onload = null;
-          drawable.onerror = null;
-          drawable.src = "";
-        }
-        images[index] = undefined;
-        frameState[index] = 0;
-        frameReadyRef.current[index] = false;
-        removeCount -= 1;
-      }
-    };
-
-    const pumpQueue = () => {
-      while (!cancelled && activeLoads < PARALLEL_FRAME_LOADS && queue.length > 0) {
-        const index = queue.shift();
-        if (index === undefined || frameState[index] !== 0) continue;
-
-        const image = new Image();
-        activeLoads += 1;
-        frameState[index] = 1;
-        image.decoding = "async";
-        image.fetchPriority = Math.abs(index - targetFrameRef.current) <= 1 ? "high" : "auto";
-        images[index] = image;
-        activeImages.set(index, image);
-
-        image.onload = async () => {
-          if (activeImages.get(index) !== image) return;
-          let drawable: SpiderFrame = image;
-          try {
-            if (typeof createImageBitmap === "function") drawable = await createImageBitmap(image, {
-              resizeWidth: BITMAP_WIDTH,
-              resizeHeight: BITMAP_HEIGHT,
-              resizeQuality: "medium",
-            });
-          } catch {
-            // Keep the image fallback for browsers without ImageBitmap support.
-          }
-          if (activeImages.get(index) !== image) {
-            if (isImageBitmap(drawable)) drawable.close();
-            return;
-          }
-          activeImages.delete(index);
-          activeLoads -= 1;
-          if (cancelled) return;
-          images[index] = drawable;
-          if (drawable !== image) {
-            image.onload = null;
-            image.onerror = null;
-            image.src = "";
-          }
-          frameState[index] = 2;
-          frameReadyRef.current[index] = true;
-
-          if (!loadedRef.current && ANCHOR_FRAMES.includes(index)) {
-            settledAnchors.add(index);
-            setLoadProgress(settledAnchors.size / ANCHOR_FRAMES.length);
-            if (frameState[0] === 2 && settledAnchors.size >= ANCHOR_FRAMES.length) {
-              loadedRef.current = true;
-              setLoaded(true);
-            }
-          }
-
-          if (Math.abs(index - targetFrameRef.current) <= NEAREST_FRAME_SEARCH) {
-            renderFrameRef.current();
-          }
-          evictDistantFrames(protectedFrames.size + CACHE_BUFFER);
-          pumpQueue();
-        };
-        image.onerror = () => {
-          if (activeImages.get(index) !== image) return;
-          activeImages.delete(index);
-          activeLoads -= 1;
-          if (cancelled) return;
-          frameState[index] = 3;
-          if (!loadedRef.current && ANCHOR_FRAMES.includes(index)) {
-            settledAnchors.add(index);
-            setLoadProgress(settledAnchors.size / ANCHOR_FRAMES.length);
-            if (frameState[0] === 2 && settledAnchors.size >= ANCHOR_FRAMES.length) {
-              loadedRef.current = true;
-              setLoaded(true);
-            }
-          }
-          pumpQueue();
-        };
-        image.src = spiderFramePath(index + 1);
-      }
-    };
-
-    const ensureFrames = (index: number, direction: number) => {
-      if (cancelled) return;
-      const travelDirection = direction < 0 ? -1 : 1;
-      const distanceMoved = Math.abs(index - lastRequestedFrame);
-      const lookAhead = Math.min(MAX_LOOK_AHEAD, INITIAL_LOOK_AHEAD + distanceMoved * 2);
-      lastRequestedFrame = index;
-      const desired: number[] = [index];
-
-      for (let distance = 1; distance <= lookAhead; distance += 1) {
-        const frame = index + distance * FRAME_STEP * travelDirection;
-        if (frame >= 0 && frame < SPIDER_FRAME_COUNT) desired.push(frame);
-        if (distance <= LOOK_BEHIND) {
-          const trailingFrame = index - distance * FRAME_STEP * travelDirection;
-          if (trailingFrame >= 0 && trailingFrame < SPIDER_FRAME_COUNT) {
-            desired.push(trailingFrame);
-          }
-        }
-      }
-
-      protectedFrames = new Set([...ANCHOR_FRAMES, ...desired]);
-      if (lastFrameRef.current >= 0) protectedFrames.add(lastFrameRef.current);
-
-      // Old in-flight requests used to occupy every connection after a fast
-      // scroll jump. Cancel them so the newly requested frame starts now.
-      if (distanceMoved > CANCEL_LOADS_AFTER_JUMP) {
-        const prioritizedActiveLoads = [...activeImages].sort(
-          ([a], [b]) => Math.abs(a - index) - Math.abs(b - index),
-        );
-        let retainedNearbyLoads = 0;
-        for (const [activeIndex, image] of prioritizedActiveLoads) {
-          if (protectedFrames.has(activeIndex)) continue;
-          if (
-            retainedNearbyLoads < 2 &&
-            Math.abs(activeIndex - index) <= NEAREST_FRAME_SEARCH
-          ) {
-            retainedNearbyLoads += 1;
-            continue;
-          }
-          activeImages.delete(activeIndex);
-          image.onload = null;
-          image.onerror = null;
-          image.src = "";
-          images[activeIndex] = undefined;
-          frameState[activeIndex] = 0;
-          activeLoads -= 1;
-        }
-      }
-
-      queue = [...desired, ...ANCHOR_FRAMES].filter(
-        (frame, position, frames) =>
-          frames.indexOf(frame) === position && frameState[frame] === 0,
-      );
-      pumpQueue();
-      evictDistantFrames(desired.length + CACHE_BUFFER);
-    };
-    ensureFramesRef.current = ensureFrames;
-
-    const startLoading = () => {
-      if (loadingStartedRef.current || cancelled) return;
-      loadingStartedRef.current = true;
-      protectedFrames = new Set(ANCHOR_FRAMES);
-      queue = ANCHOR_FRAMES.filter((frame) => frameState[frame] === 0);
-      pumpQueue();
-    };
-
-    const section = sectionRef.current;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) startLoading();
-      },
-      { rootMargin: "100% 0px" },
-    );
-    if (section) observer.observe(section);
-
-    return () => {
-      cancelled = true;
-      ensureFramesRef.current = () => undefined;
-      loadingStartedRef.current = false;
-      observer.disconnect();
-      for (const drawable of images) {
-        if (isImageBitmap(drawable)) {
-          drawable.close();
-        } else if (drawable instanceof HTMLImageElement) {
-          drawable.onload = null;
-          drawable.onerror = null;
-          drawable.src = "";
-        }
-      }
-    };
-  }, []);
-
-  const drawImage = useCallback((image: SpiderFrame) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = contextRef.current ?? canvas.getContext("2d", {
-      alpha: false,
-      desynchronized: true,
-    });
-    if (!context) return;
-    contextRef.current = context;
-
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "medium";
-
-    const sourceWidth = image instanceof HTMLImageElement
-      ? image.naturalWidth
-      : image.width;
-    const sourceHeight = image instanceof HTMLImageElement
-      ? image.naturalHeight
-      : image.height;
-    const imageRatio = sourceWidth / sourceHeight;
-    const canvasRatio = canvas.width / canvas.height;
-    let width: number;
-    let height: number;
-
-    if (canvasRatio > imageRatio) {
-      width = canvas.width;
-      height = width / imageRatio;
-    } else {
-      height = canvas.height;
-      width = height * imageRatio;
-    }
-
-    context.drawImage(
-      image,
-      (canvas.width - width) / 2,
-      (canvas.height - height) / 2,
-      width,
-      height,
-    );
-  }, []);
-
-  const renderFrame = useCallback(() => {
-    const target = targetFrameRef.current;
-    let drawableFrame = target;
-    if (!frameReadyRef.current[drawableFrame]) {
-      for (let distance = 1; distance <= NEAREST_FRAME_SEARCH; distance += 1) {
-        const before = target - distance;
-        const after = target + distance;
-        if (before >= 0 && frameReadyRef.current[before]) {
-          drawableFrame = before;
-          break;
-        }
-        if (after < SPIDER_FRAME_COUNT && frameReadyRef.current[after]) {
-          drawableFrame = after;
-          break;
-        }
-      }
-    }
-    const image = frameReadyRef.current[drawableFrame]
-      ? framesRef.current[drawableFrame]
-      : lastImageRef.current;
-    if (!image) return;
-
-    drawImage(image);
-    if (
-      frameReadyRef.current[drawableFrame] &&
-      image === framesRef.current[drawableFrame]
-    ) {
-      lastFrameRef.current = drawableFrame;
-    }
-    lastImageRef.current = image;
-  }, [drawImage]);
-
-  useEffect(() => {
-    renderFrameRef.current = renderFrame;
-  }, [renderFrame]);
-
-  const resizeCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    let renderWidth = Math.round(window.innerWidth * dpr);
-    let renderHeight = Math.round(window.innerHeight * dpr);
-    const pixelCount = renderWidth * renderHeight;
-    if (pixelCount > MAX_CANVAS_PIXELS) {
-      const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
-      renderWidth = Math.round(renderWidth * scale);
-      renderHeight = Math.round(renderHeight * scale);
-    }
-    canvas.width = renderWidth;
-    canvas.height = renderHeight;
-    canvas.style.width = `${window.innerWidth}px`;
-    canvas.style.height = `${window.innerHeight}px`;
-    renderFrame();
-  }, [renderFrame]);
-
-  useEffect(() => {
-    resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
-    return () => window.removeEventListener("resize", resizeCanvas);
-  }, [resizeCanvas]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    renderFrame();
-  }, [renderFrame, loaded]);
-
-  const handleScroll = useCallback(() => {
-    const section = sectionRef.current;
-    if (!section) return;
-
-    const rect = section.getBoundingClientRect();
-    if (rect.top > window.innerHeight || rect.bottom < 0) return;
-    const scrollable = section.offsetHeight - window.innerHeight;
-    const progress = Math.min(1, Math.max(0, -rect.top / scrollable));
-    const rawFrame = Math.min(
-      SPIDER_FRAME_COUNT - 1,
-      Math.floor(progress * SPIDER_FRAME_COUNT),
-    );
-    const frame = Math.min(
-      SPIDER_FRAME_COUNT - 1,
-      Math.round(rawFrame / FRAME_STEP) * FRAME_STEP,
-    );
-
-    const previousFrame = targetFrameRef.current;
-    const direction = Math.sign(frame - previousFrame);
-    targetFrameRef.current = frame;
-    if (!loadingStartedRef.current) return;
-    ensureFramesRef.current(frame, direction);
-    if (!loadedRef.current) return;
-    if (frame !== lastFrameRef.current) {
-      renderFrame();
-    }
-
+  const handleProgress = useCallback((progress: number, frameIndex: number) => {
     if (introRef.current) {
       const opacity = Math.max(0, 1 - progress / 0.14);
       introRef.current.style.opacity = String(opacity);
@@ -412,7 +36,8 @@ export function SpiderManReveal() {
       progressRef.current.style.transform = `scaleX(${progress})`;
     }
     if (sequenceRef.current) {
-      sequenceRef.current.textContent = `SEQ ${String(frame + 1).padStart(3, "0")} / ${SPIDER_FRAME_COUNT}`;
+      sequenceRef.current.textContent =
+        `SEQ ${String(frameIndex + 1).padStart(3, "0")} / ${SPIDER_FRAME_COUNT}`;
     }
 
     updateBeatVisibility(beatElementsRef.current, SPIDER_BEATS, progress);
@@ -422,9 +47,14 @@ export function SpiderManReveal() {
       const visible = progress >= beat.show && progress <= beat.hide;
       mobileElement.classList.toggle("is-visible", visible);
     }
-  }, [renderFrame]);
+  }, []);
 
-  useLenisScroll(handleScroll, [handleScroll]);
+  const { sectionRef, canvasRef, loadProgress, loaded } = useCanvasImageSequence({
+    frameCount: SPIDER_FRAME_COUNT,
+    framePath: spiderFramePath,
+    maxCanvasPixels: MAX_CANVAS_PIXELS,
+    onProgress: handleProgress,
+  });
 
   return (
     <section
@@ -465,7 +95,7 @@ export function SpiderManReveal() {
         <div className="pointer-events-none absolute left-6 top-20 z-10 flex items-center gap-2 md:left-10 md:top-24">
           <div className="h-px w-8 bg-accent/60" />
           <span className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-400">
-            Web Protocol — Active
+            Web Protocol &mdash; Active
           </span>
         </div>
         <div className="pointer-events-none absolute right-6 top-20 z-10 flex items-center gap-3 md:right-10 md:top-24">
@@ -539,7 +169,7 @@ export function SpiderManReveal() {
           className="pointer-events-none absolute bottom-24 left-6 z-10 flex flex-col items-start gap-4 md:bottom-32 md:left-12"
           style={{ opacity: 0 }}
         >
-          <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">Mission — complete</span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">Mission &mdash; complete</span>
           <span className="rounded-full border border-white/15 bg-black/30 px-5 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.22em] text-foreground backdrop-blur-md">
             SpiderMan X Shivam
           </span>
@@ -552,7 +182,7 @@ export function SpiderManReveal() {
           <div className="mx-6 flex items-center justify-between pb-4 font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500 md:mx-10">
             <span>SPIDER-MAN // ACTIVE</span>
             <span>SHIVAM // CREATOR</span>
-            <span>Scroll ↓</span>
+            <span>Scroll &darr;</span>
           </div>
         </div>
 
@@ -563,7 +193,7 @@ export function SpiderManReveal() {
               <div className="h-full bg-accent transition-[width] duration-150 ease-out" style={{ width: `${Math.round(loadProgress * 100)}%` }} />
             </div>
             <p className="font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
-              Loading Spider Verse &nbsp;·&nbsp; {Math.round(loadProgress * 100)}%
+              Loading Spider Verse &nbsp;&middot;&nbsp; {Math.round(loadProgress * 100)}%
             </p>
           </div>
         )}
