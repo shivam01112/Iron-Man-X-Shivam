@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useScroll } from "framer-motion";
 
-const PRELOAD_AHEAD = 10;
-const PRELOAD_BEHIND = 5;
-const MAX_CACHED_FRAMES = 25;
-const PARALLEL_LOADS = 4;
+const PRELOAD_AHEAD = 28;
+const PRELOAD_BEHIND = 8;
+const MAX_CACHED_FRAMES = 48;
+const PARALLEL_LOADS = 5;
 
 type SequenceOptions = {
   frameCount: number;
@@ -34,13 +34,16 @@ export function useCanvasImageSequence({
   const activeRef = useRef(false);
   const loadedRef = useRef(false);
   const rafRef = useRef<number | null>(null);
+  const directionRef = useRef(1);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
   const scheduleRenderRef = useRef<() => void>(() => undefined);
   const onProgressRef = useRef(onProgress);
   const [loadProgress, setLoadProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
 
-  onProgressRef.current = onProgress;
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
 
   const drawTargetFrame = useCallback(() => {
     const canvas = canvasRef.current;
@@ -112,8 +115,11 @@ export function useCanvasImageSequence({
       const previousFrame = targetFrameRef.current;
       progressRef.current = clampedProgress;
       targetFrameRef.current = nextFrame;
+      if (nextFrame !== previousFrame) {
+        directionRef.current = Math.sign(nextFrame - previousFrame);
+      }
       if (nearbyRef.current) {
-        ensureFramesRef.current(nextFrame, Math.sign(nextFrame - previousFrame));
+        ensureFramesRef.current(nextFrame, directionRef.current);
       }
       scheduleRenderRef.current();
     });
@@ -168,7 +174,13 @@ export function useCanvasImageSequence({
         activeImages.set(index, image);
         image.decoding = "async";
         image.fetchPriority = index === targetFrameRef.current ? "high" : "auto";
-        image.onload = () => {
+        image.onload = async () => {
+          try {
+            await image.decode();
+          } catch {
+            // drawImage can still use an image after decode() rejects in browsers
+            // that do not fully support explicit async decoding.
+          }
           if (activeImages.get(index) !== image) return;
           activeImages.delete(index);
           activeLoads -= 1;
@@ -196,17 +208,9 @@ export function useCanvasImageSequence({
       }
     };
 
-    const stopUnneededLoads = () => {
+    const stopAggressiveLoading = () => {
       queue = [];
-      for (const [index, image] of activeImages) {
-        activeImages.delete(index);
-        image.onload = null;
-        image.onerror = null;
-        image.src = "";
-        frames[index] = undefined;
-        states[index] = 0;
-        activeLoads -= 1;
-      }
+      wantedFrames.clear();
     };
 
     const ensureFrames = (index: number, direction: number) => {
@@ -223,17 +227,8 @@ export function useCanvasImageSequence({
       }
       wantedFrames = new Set(desired);
 
-      for (const [activeIndex, image] of activeImages) {
-        if (wantedFrames.has(activeIndex)) continue;
-        activeImages.delete(activeIndex);
-        image.onload = null;
-        image.onerror = null;
-        image.src = "";
-        frames[activeIndex] = undefined;
-        states[activeIndex] = 0;
-        activeLoads -= 1;
-      }
-
+      // Replace, rather than append to, pending work. Already-started requests are
+      // allowed to finish so rapid target changes never restart the same download.
       queue = desired.filter((frame) => states[frame] === 0);
       evictFrames();
       pumpQueue();
@@ -245,17 +240,17 @@ export function useCanvasImageSequence({
       ([entry]) => {
         nearbyRef.current = entry.isIntersecting;
         if (entry.isIntersecting) {
-          ensureFrames(targetFrameRef.current, 1);
+          ensureFrames(targetFrameRef.current, directionRef.current);
         } else {
-          stopUnneededLoads();
+          stopAggressiveLoading();
         }
       },
-      { rootMargin: "100% 0px" },
+      { rootMargin: "120% 0px 100% 0px" },
     );
     const activeObserver = new IntersectionObserver(([entry]) => {
       activeRef.current = entry.isIntersecting;
       if (entry.isIntersecting) {
-        ensureFrames(targetFrameRef.current, 1);
+        ensureFrames(targetFrameRef.current, directionRef.current);
         scheduleRenderRef.current();
       } else if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
@@ -271,7 +266,7 @@ export function useCanvasImageSequence({
       cancelled = true;
       nearbyObserver.disconnect();
       activeObserver.disconnect();
-      stopUnneededLoads();
+      stopAggressiveLoading();
       ensureFramesRef.current = () => undefined;
       for (const image of frames) {
         if (!image) continue;
@@ -285,27 +280,30 @@ export function useCanvasImageSequence({
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    let width = Math.round(window.innerWidth * dpr);
-    let height = Math.round(window.innerHeight * dpr);
+    let width = Math.round(bounds.width * dpr);
+    let height = Math.round(bounds.height * dpr);
     const pixelCount = width * height;
     if (pixelCount > maxCanvasPixels) {
       const scale = Math.sqrt(maxCanvasPixels / pixelCount);
       width = Math.round(width * scale);
       height = Math.round(height * scale);
     }
+    if (canvas.width === width && canvas.height === height) return;
     canvas.width = width;
     canvas.height = height;
-    canvas.style.width = `${window.innerWidth}px`;
-    canvas.style.height = `${window.innerHeight}px`;
     scheduleRenderRef.current();
   }, [maxCanvasPixels]);
 
   useEffect(() => {
     resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
+    const canvas = canvasRef.current;
+    const resizeObserver = new ResizeObserver(resizeCanvas);
+    if (canvas) resizeObserver.observe(canvas);
     return () => {
-      window.removeEventListener("resize", resizeCanvas);
+      resizeObserver.disconnect();
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, [resizeCanvas]);
