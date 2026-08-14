@@ -17,6 +17,8 @@ type SequenceOptions = {
   onProgress: (progress: number, frameIndex: number) => void;
 };
 
+type FrameImage = ImageBitmap;
+
 export function useCanvasImageSequence({
   frameCount,
   framePath,
@@ -27,7 +29,7 @@ export function useCanvasImageSequence({
   const sectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
-  const framesRef = useRef<Array<HTMLImageElement | undefined>>([]);
+  const framesRef = useRef<Array<FrameImage | undefined>>([]);
   const targetFrameRef = useRef(0);
   const lastDrawnFrameRef = useRef(-1);
   const progressRef = useRef(0);
@@ -60,10 +62,10 @@ export function useCanvasImageSequence({
     const target = targetFrameRef.current;
 
     // Find the best available frame: exact target first, then nearest loaded
-    let image: HTMLImageElement | undefined = frames[target];
+    let image: FrameImage | undefined = frames[target];
     let drawn = target;
 
-    if (!image || !image.complete || !image.naturalWidth) {
+    if (!image) {
       // Walk outward from target looking for any ready frame
       image = undefined;
       for (let dist = 1; dist < frameCount; dist++) {
@@ -72,11 +74,11 @@ export function useCanvasImageSequence({
         const ahead = target + dist;
         if (behind >= 0) {
           const f = frames[behind];
-          if (f && f.complete && f.naturalWidth) { image = f; drawn = behind; break; }
+          if (f) { image = f; drawn = behind; break; }
         }
         if (ahead < frameCount) {
           const f = frames[ahead];
-          if (f && f.complete && f.naturalWidth) { image = f; drawn = ahead; break; }
+          if (f) { image = f; drawn = ahead; break; }
         }
       }
     }
@@ -87,7 +89,7 @@ export function useCanvasImageSequence({
     if (drawn === lastDrawnFrameRef.current) return drawn === target;
 
     const canvasRatio = canvas.width / canvas.height;
-    const imageRatio = image.naturalWidth / image.naturalHeight;
+    const imageRatio = image.width / image.height;
     let width: number;
     let height: number;
     if (canvasRatio > imageRatio) {
@@ -185,9 +187,9 @@ export function useCanvasImageSequence({
     let activeLoads = 0;
     let queue: number[] = [];
     let wantedFrames = new Set<number>();
-    const frames = new Array<HTMLImageElement | undefined>(frameCount);
+    const frames = new Array<FrameImage | undefined>(frameCount);
     const states = new Array<0 | 1 | 2 | 3>(frameCount).fill(0);
-    const activeImages = new Map<number, HTMLImageElement>();
+    const activeRequests = new Map<number, AbortController>();
     framesRef.current = frames;
 
     const evictFrames = () => {
@@ -206,15 +208,65 @@ export function useCanvasImageSequence({
           index === targetFrameRef.current ||
           index === lastDrawnFrameRef.current
         ) continue;
-        const image = frames[index];
-        if (image) {
-          image.onload = null;
-          image.onerror = null;
-          image.src = "";
-        }
+        frames[index]?.close();
         frames[index] = undefined;
         states[index] = 0;
         removeCount -= 1;
+      }
+    };
+
+    const loadFrame = async (index: number) => {
+      const controller = new AbortController();
+      activeLoads += 1;
+      states[index] = 1;
+      activeRequests.set(index, controller);
+
+      try {
+        const response = await fetch(framePath(index + 1), {
+          signal: controller.signal,
+          priority: index === targetFrameRef.current ? "high" : "auto",
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to load frame ${index + 1}: ${response.status}`);
+        }
+
+        const bitmap = await createImageBitmap(await response.blob());
+        if (
+          cancelled ||
+          controller.signal.aborted ||
+          activeRequests.get(index) !== controller
+        ) {
+          bitmap.close();
+          return;
+        }
+
+        frames[index] = bitmap;
+        states[index] = 2;
+        if (!loadedRef.current) {
+          loadedRef.current = true;
+          setLoadProgress(1);
+          setLoaded(true);
+        }
+        if (waitingForFrameRef.current || index === targetFrameRef.current) {
+          startRafLoopRef.current();
+        }
+        evictFrames();
+      } catch (error) {
+        if (activeRequests.get(index) !== controller) return;
+        frames[index] = undefined;
+        states[index] = controller.signal.aborted ? 0 : 3;
+        if (controller.signal.aborted && wantedFrames.has(index)) {
+          queue.unshift(index);
+        }
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          console.warn(error);
+        }
+      } finally {
+        if (activeRequests.get(index) === controller) {
+          activeRequests.delete(index);
+          activeLoads -= 1;
+        }
+        pumpQueue();
       }
     };
 
@@ -222,55 +274,14 @@ export function useCanvasImageSequence({
       while (!cancelled && nearbyRef.current && activeLoads < PARALLEL_LOADS && queue.length) {
         const index = queue.shift();
         if (index === undefined || states[index] !== 0) continue;
-        const image = new Image();
-        activeLoads += 1;
-        states[index] = 1;
-        frames[index] = image;
-        activeImages.set(index, image);
-        image.decoding = "async";
-        image.fetchPriority = index === targetFrameRef.current ? "high" : "auto";
-        image.onload = async () => {
-          try {
-            await image.decode();
-          } catch {
-            // drawImage can still use an image after decode() rejects in browsers
-            // that do not fully support explicit async decoding.
-          }
-          if (activeImages.get(index) !== image) return;
-          activeImages.delete(index);
-          activeLoads -= 1;
-          if (cancelled) return;
-          states[index] = 2;
-          if (!loadedRef.current) {
-            loadedRef.current = true;
-            setLoadProgress(1);
-            setLoaded(true);
-          }
-          // If the loop is already waiting for a frame, it will pick this up
-          // on its next tick. If it has gone idle, restart it now so we
-          // immediately render the newly-arrived frame.
-          if (waitingForFrameRef.current || index === targetFrameRef.current) {
-            startRafLoopRef.current();
-          }
-          evictFrames();
-          pumpQueue();
-        };
-        image.onerror = () => {
-          if (activeImages.get(index) !== image) return;
-          activeImages.delete(index);
-          activeLoads -= 1;
-          if (cancelled) return;
-          states[index] = 3;
-          frames[index] = undefined;
-          pumpQueue();
-        };
-        image.src = framePath(index + 1);
+        void loadFrame(index);
       }
     };
 
     const stopAggressiveLoading = () => {
       queue = [];
       wantedFrames.clear();
+      for (const controller of activeRequests.values()) controller.abort();
     };
 
     const ensureFrames = (index: number, direction: number) => {
@@ -287,8 +298,13 @@ export function useCanvasImageSequence({
       }
       wantedFrames = new Set(desired);
 
-      // Replace, rather than append to, pending work. Already-started requests are
-      // allowed to finish so rapid target changes never restart the same download.
+      // Cancel stale downloads after a rapid direction/position change. Frames
+      // that already decoded remain cached until normal distance-based eviction.
+      for (const [frame, controller] of activeRequests) {
+        if (!wantedFrames.has(frame)) controller.abort();
+      }
+
+      // Replace, rather than append to, pending work.
       queue = desired.filter((frame) => states[frame] === 0);
       evictFrames();
       pumpQueue();
@@ -331,12 +347,8 @@ export function useCanvasImageSequence({
       activeObserver.disconnect();
       stopAggressiveLoading();
       ensureFramesRef.current = () => undefined;
-      for (const image of frames) {
-        if (!image) continue;
-        image.onload = null;
-        image.onerror = null;
-        image.src = "";
-      }
+      for (const bitmap of frames) bitmap?.close();
+      framesRef.current = [];
     };
   }, [frameCount, framePath]);
 
