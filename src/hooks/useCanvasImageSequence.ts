@@ -6,7 +6,8 @@ import { useScroll } from "framer-motion";
 const PRELOAD_AHEAD = 28;
 const PRELOAD_BEHIND = 8;
 const MAX_CACHED_FRAMES = 48;
-const PARALLEL_LOADS = 5;
+// Reduced from 5 → 3 to avoid saturating HTTP/2 across 3 concurrent sections.
+const PARALLEL_LOADS = 3;
 
 type SequenceOptions = {
   frameCount: number;
@@ -33,10 +34,12 @@ export function useCanvasImageSequence({
   const nearbyRef = useRef(false);
   const activeRef = useRef(false);
   const loadedRef = useRef(false);
+  // rafRef: null = loop not running, number = pending RAF handle
   const rafRef = useRef<number | null>(null);
+  // True while we're waiting for the target frame to load so the loop keeps ticking
+  const waitingForFrameRef = useRef(false);
   const directionRef = useRef(1);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
-  const scheduleRenderRef = useRef<() => void>(() => undefined);
   const onProgressRef = useRef(onProgress);
   const [loadProgress, setLoadProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -45,19 +48,43 @@ export function useCanvasImageSequence({
     onProgressRef.current = onProgress;
   }, [onProgress]);
 
-  const drawTargetFrame = useCallback(() => {
+  // ─── Draw ──────────────────────────────────────────────────────────────────
+  // Returns true if the exact target frame was drawn, false if we fell back to
+  // a nearby frame (or nothing was drawable yet).
+  const drawTargetFrame = useCallback((): boolean => {
     const canvas = canvasRef.current;
-    const image = framesRef.current[targetFrameRef.current];
-    if (!canvas || !image || !image.complete || !image.naturalWidth) return;
+    const context = contextRef.current;
+    if (!canvas || !context) return false;
 
-    const context = contextRef.current ?? canvas.getContext("2d", {
-      alpha: false,
-      desynchronized: true,
-    });
-    if (!context) return;
-    contextRef.current = context;
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "medium";
+    const frames = framesRef.current;
+    const target = targetFrameRef.current;
+
+    // Find the best available frame: exact target first, then nearest loaded
+    let image: HTMLImageElement | undefined = frames[target];
+    let drawn = target;
+
+    if (!image || !image.complete || !image.naturalWidth) {
+      // Walk outward from target looking for any ready frame
+      image = undefined;
+      for (let dist = 1; dist < frameCount; dist++) {
+        // Prefer the frame just behind (already drawn side) for continuity
+        const behind = target - dist;
+        const ahead = target + dist;
+        if (behind >= 0) {
+          const f = frames[behind];
+          if (f && f.complete && f.naturalWidth) { image = f; drawn = behind; break; }
+        }
+        if (ahead < frameCount) {
+          const f = frames[ahead];
+          if (f && f.complete && f.naturalWidth) { image = f; drawn = ahead; break; }
+        }
+      }
+    }
+
+    if (!image) return false;
+
+    // Skip redundant draws
+    if (drawn === lastDrawnFrameRef.current) return drawn === target;
 
     const canvasRatio = canvas.width / canvas.height;
     const imageRatio = image.naturalWidth / image.naturalHeight;
@@ -83,23 +110,49 @@ export function useCanvasImageSequence({
       width,
       height,
     );
-    lastDrawnFrameRef.current = targetFrameRef.current;
-  }, [mobileScale]);
+    lastDrawnFrameRef.current = drawn;
+    return drawn === target;
+  }, [frameCount, mobileScale]);
 
-  const scheduleRender = useCallback(() => {
-    if (!activeRef.current || rafRef.current !== null) return;
-    rafRef.current = requestAnimationFrame(() => {
+  // ─── RAF render loop ───────────────────────────────────────────────────────
+  // A single persistent loop per section. Starts when section is active,
+  // runs until the exact target frame is drawn, then idles.
+  // If the target frame isn't loaded yet it keeps ticking (retrying each RAF)
+  // so there's never a frozen frame waiting for a scroll event.
+  const startRafLoopRef = useRef<() => void>(() => undefined);
+
+  const startRafLoop = useCallback(() => {
+    if (!activeRef.current) return;
+    if (rafRef.current !== null) return; // already running
+
+    const tick = () => {
       rafRef.current = null;
-      if (!activeRef.current) return;
+      if (!activeRef.current) {
+        waitingForFrameRef.current = false;
+        return;
+      }
+
       onProgressRef.current(progressRef.current, targetFrameRef.current);
-      drawTargetFrame();
-    });
+      const exact = drawTargetFrame();
+
+      if (!exact) {
+        // Target frame not ready — keep the loop alive so we retry next tick
+        waitingForFrameRef.current = true;
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        // Exact frame drawn — go idle until next scroll event
+        waitingForFrameRef.current = false;
+      }
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
   }, [drawTargetFrame]);
 
   useEffect(() => {
-    scheduleRenderRef.current = scheduleRender;
-  }, [scheduleRender]);
+    startRafLoopRef.current = startRafLoop;
+  }, [startRafLoop]);
 
+  // ─── Scroll → target frame ─────────────────────────────────────────────────
   const { scrollYProgress } = useScroll({
     target: sectionRef,
     offset: ["start start", "end end"],
@@ -121,10 +174,12 @@ export function useCanvasImageSequence({
       if (nearbyRef.current) {
         ensureFramesRef.current(nextFrame, directionRef.current);
       }
-      scheduleRenderRef.current();
+      // Always kick the loop. If it's already running it won't double-start.
+      startRafLoopRef.current();
     });
   }, [frameCount, scrollYProgress]);
 
+  // ─── Image loading ─────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     let activeLoads = 0;
@@ -191,7 +246,12 @@ export function useCanvasImageSequence({
             setLoadProgress(1);
             setLoaded(true);
           }
-          if (index === targetFrameRef.current) scheduleRenderRef.current();
+          // If the loop is already waiting for a frame, it will pick this up
+          // on its next tick. If it has gone idle, restart it now so we
+          // immediately render the newly-arrived frame.
+          if (waitingForFrameRef.current || index === targetFrameRef.current) {
+            startRafLoopRef.current();
+          }
           evictFrames();
           pumpQueue();
         };
@@ -251,10 +311,13 @@ export function useCanvasImageSequence({
       activeRef.current = entry.isIntersecting;
       if (entry.isIntersecting) {
         ensureFrames(targetFrameRef.current, directionRef.current);
-        scheduleRenderRef.current();
-      } else if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
+        startRafLoopRef.current();
+      } else {
+        if (rafRef.current !== null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        waitingForFrameRef.current = false;
       }
     });
     if (section) {
@@ -277,11 +340,13 @@ export function useCanvasImageSequence({
     };
   }, [frameCount, framePath]);
 
+  // ─── Canvas sizing ─────────────────────────────────────────────────────────
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
+    // Cap DPR at 1.25–1.5 to avoid massive canvas pixel counts on hi-DPI screens
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     let width = Math.round(bounds.width * dpr);
     let height = Math.round(bounds.height * dpr);
@@ -294,7 +359,17 @@ export function useCanvasImageSequence({
     if (canvas.width === width && canvas.height === height) return;
     canvas.width = width;
     canvas.height = height;
-    scheduleRenderRef.current();
+    // Eagerly (re-)acquire the context so drawTargetFrame's hot path never
+    // has to call getContext() during a scroll RAF tick.
+    const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+    if (ctx) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "medium";
+      contextRef.current = ctx;
+    }
+    // Redraw current frame at new resolution
+    lastDrawnFrameRef.current = -1;
+    startRafLoopRef.current();
   }, [maxCanvasPixels]);
 
   useEffect(() => {
