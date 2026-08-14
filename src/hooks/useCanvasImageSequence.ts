@@ -6,7 +6,7 @@ import { useScroll } from "framer-motion";
 const PRELOAD_AHEAD = 28;
 const PRELOAD_BEHIND = 8;
 const MAX_CACHED_FRAMES = 48;
-// Reduced from 5 → 3 to avoid saturating HTTP/2 across 3 concurrent sections.
+// 3 per section × 3 sections = 9 concurrent — HTTP/2-friendly
 const PARALLEL_LOADS = 3;
 
 type SequenceOptions = {
@@ -16,8 +16,6 @@ type SequenceOptions = {
   mobileScale?: number;
   onProgress: (progress: number, frameIndex: number) => void;
 };
-
-type FrameImage = ImageBitmap;
 
 export function useCanvasImageSequence({
   frameCount,
@@ -29,19 +27,21 @@ export function useCanvasImageSequence({
   const sectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
-  const framesRef = useRef<Array<FrameImage | undefined>>([]);
+  // ImageBitmap: already GPU-decoded, drawImage is zero-cost on the main thread
+  const framesRef = useRef<Array<ImageBitmap | undefined>>([]);
   const targetFrameRef = useRef(0);
   const lastDrawnFrameRef = useRef(-1);
   const progressRef = useRef(0);
   const nearbyRef = useRef(false);
   const activeRef = useRef(false);
   const loadedRef = useRef(false);
-  // rafRef: null = loop not running, number = pending RAF handle
+  // null = RAF loop not running; number = pending handle
   const rafRef = useRef<number | null>(null);
-  // True while we're waiting for the target frame to load so the loop keeps ticking
+  // true while we're polling for the target frame to arrive
   const waitingForFrameRef = useRef(false);
   const directionRef = useRef(1);
   const ensureFramesRef = useRef<(index: number, direction: number) => void>(() => undefined);
+  const startRafLoopRef = useRef<() => void>(() => undefined);
   const onProgressRef = useRef(onProgress);
   const [loadProgress, setLoadProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -51,8 +51,8 @@ export function useCanvasImageSequence({
   }, [onProgress]);
 
   // ─── Draw ──────────────────────────────────────────────────────────────────
-  // Returns true if the exact target frame was drawn, false if we fell back to
-  // a nearby frame (or nothing was drawable yet).
+  // Returns true when the *exact* target frame was drawn.
+  // Falls back to the nearest already-loaded frame so the canvas is never blank.
   const drawTargetFrame = useCallback((): boolean => {
     const canvas = canvasRef.current;
     const context = contextRef.current;
@@ -61,88 +61,60 @@ export function useCanvasImageSequence({
     const frames = framesRef.current;
     const target = targetFrameRef.current;
 
-    // Find the best available frame: exact target first, then nearest loaded
-    let image: FrameImage | undefined = frames[target];
+    let bitmap: ImageBitmap | undefined = frames[target];
     let drawn = target;
 
-    if (!image) {
-      // Walk outward from target looking for any ready frame
-      image = undefined;
+    if (!bitmap) {
+      // Walk outward; prefer "behind" direction for visual continuity
       for (let dist = 1; dist < frameCount; dist++) {
-        // Prefer the frame just behind (already drawn side) for continuity
         const behind = target - dist;
         const ahead = target + dist;
-        if (behind >= 0) {
-          const f = frames[behind];
-          if (f) { image = f; drawn = behind; break; }
-        }
-        if (ahead < frameCount) {
-          const f = frames[ahead];
-          if (f) { image = f; drawn = ahead; break; }
-        }
+        if (behind >= 0 && frames[behind]) { bitmap = frames[behind]; drawn = behind; break; }
+        if (ahead < frameCount && frames[ahead]) { bitmap = frames[ahead]; drawn = ahead; break; }
       }
     }
 
-    if (!image) return false;
-
-    // Skip redundant draws
+    if (!bitmap) return false;
+    // Skip redundant draws (same frame already on canvas)
     if (drawn === lastDrawnFrameRef.current) return drawn === target;
 
     const canvasRatio = canvas.width / canvas.height;
-    const imageRatio = image.width / image.height;
-    let width: number;
-    let height: number;
-    if (canvasRatio > imageRatio) {
-      width = canvas.width;
-      height = width / imageRatio;
+    const bitmapRatio = bitmap.width / bitmap.height;
+    let w: number, h: number;
+    if (canvasRatio > bitmapRatio) {
+      w = canvas.width;
+      h = w / bitmapRatio;
     } else {
-      height = canvas.height;
-      width = height * imageRatio;
+      h = canvas.height;
+      w = h * bitmapRatio;
     }
-    if (window.innerWidth <= 768) {
-      width *= mobileScale;
-      height *= mobileScale;
-    }
+    if (window.innerWidth <= 768) { w *= mobileScale; h *= mobileScale; }
 
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(
-      image,
-      (canvas.width - width) / 2,
-      (canvas.height - height) / 2,
-      width,
-      height,
-    );
+    context.drawImage(bitmap, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
     lastDrawnFrameRef.current = drawn;
     return drawn === target;
   }, [frameCount, mobileScale]);
 
   // ─── RAF render loop ───────────────────────────────────────────────────────
-  // A single persistent loop per section. Starts when section is active,
-  // runs until the exact target frame is drawn, then idles.
-  // If the target frame isn't loaded yet it keeps ticking (retrying each RAF)
-  // so there's never a frozen frame waiting for a scroll event.
-  const startRafLoopRef = useRef<() => void>(() => undefined);
-
+  // Single loop per section. Idles when exact frame is on canvas.
+  // Keeps ticking (without scroll events) while waiting for a frame to decode.
   const startRafLoop = useCallback(() => {
-    if (!activeRef.current) return;
-    if (rafRef.current !== null) return; // already running
+    if (!activeRef.current || rafRef.current !== null) return;
 
     const tick = () => {
       rafRef.current = null;
-      if (!activeRef.current) {
-        waitingForFrameRef.current = false;
-        return;
-      }
+      if (!activeRef.current) { waitingForFrameRef.current = false; return; }
 
       onProgressRef.current(progressRef.current, targetFrameRef.current);
       const exact = drawTargetFrame();
 
       if (!exact) {
-        // Target frame not ready — keep the loop alive so we retry next tick
+        // Keep looping — target not ready yet, retry next vsync
         waitingForFrameRef.current = true;
         rafRef.current = requestAnimationFrame(tick);
       } else {
-        // Exact frame drawn — go idle until next scroll event
+        // Done — go idle until scroll or a new frame arrives
         waitingForFrameRef.current = false;
       }
     };
@@ -150,9 +122,7 @@ export function useCanvasImageSequence({
     rafRef.current = requestAnimationFrame(tick);
   }, [drawTargetFrame]);
 
-  useEffect(() => {
-    startRafLoopRef.current = startRafLoop;
-  }, [startRafLoop]);
+  useEffect(() => { startRafLoopRef.current = startRafLoop; }, [startRafLoop]);
 
   // ─── Scroll → target frame ─────────────────────────────────────────────────
   const { scrollYProgress } = useScroll({
@@ -162,111 +132,52 @@ export function useCanvasImageSequence({
 
   useEffect(() => {
     return scrollYProgress.on("change", (progress) => {
-      const clampedProgress = Math.min(1, Math.max(0, progress));
-      const nextFrame = Math.min(
-        frameCount - 1,
-        Math.floor(clampedProgress * frameCount),
-      );
-      const previousFrame = targetFrameRef.current;
-      progressRef.current = clampedProgress;
+      const clamped = Math.min(1, Math.max(0, progress));
+      const nextFrame = Math.min(frameCount - 1, Math.floor(clamped * frameCount));
+      const prev = targetFrameRef.current;
+      progressRef.current = clamped;
       targetFrameRef.current = nextFrame;
-      if (nextFrame !== previousFrame) {
-        directionRef.current = Math.sign(nextFrame - previousFrame);
-      }
-      if (nearbyRef.current) {
-        ensureFramesRef.current(nextFrame, directionRef.current);
-      }
-      // Always kick the loop. If it's already running it won't double-start.
+      if (nextFrame !== prev) directionRef.current = Math.sign(nextFrame - prev);
+      if (nearbyRef.current) ensureFramesRef.current(nextFrame, directionRef.current);
       startRafLoopRef.current();
     });
   }, [frameCount, scrollYProgress]);
 
-  // ─── Image loading ─────────────────────────────────────────────────────────
+  // ─── Image loading: fetch + createImageBitmap (off-main-thread) ────────────
   useEffect(() => {
     let cancelled = false;
     let activeLoads = 0;
     let queue: number[] = [];
     let wantedFrames = new Set<number>();
-    const frames = new Array<FrameImage | undefined>(frameCount);
+    const frames = new Array<ImageBitmap | undefined>(frameCount);
+    // 0=idle 1=loading 2=ready 3=error
     const states = new Array<0 | 1 | 2 | 3>(frameCount).fill(0);
-    const activeRequests = new Map<number, AbortController>();
+    // AbortControllers keyed by frame index — only present while fetch is in-flight
+    const controllers = new Map<number, AbortController>();
     framesRef.current = frames;
 
-    const evictFrames = () => {
-      const readyFrames = states
-        .map((state, index) => state === 2 ? index : -1)
-        .filter((index) => index >= 0);
-      if (readyFrames.length <= MAX_CACHED_FRAMES) return;
-      readyFrames.sort(
-        (a, b) => Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current),
-      );
-      let removeCount = readyFrames.length - MAX_CACHED_FRAMES;
-      for (const index of readyFrames) {
-        if (removeCount <= 0) break;
-        if (
-          wantedFrames.has(index) ||
-          index === targetFrameRef.current ||
-          index === lastDrawnFrameRef.current
-        ) continue;
-        frames[index]?.close();
-        frames[index] = undefined;
-        states[index] = 0;
-        removeCount -= 1;
-      }
+    // Free GPU memory for evicted frames
+    const closeBitmap = (index: number) => {
+      const bm = frames[index];
+      if (bm) { try { bm.close(); } catch { /* already closed */ } }
+      frames[index] = undefined;
     };
 
-    const loadFrame = async (index: number) => {
-      const controller = new AbortController();
-      activeLoads += 1;
-      states[index] = 1;
-      activeRequests.set(index, controller);
-
-      try {
-        const response = await fetch(framePath(index + 1), {
-          signal: controller.signal,
-          priority: index === targetFrameRef.current ? "high" : "auto",
-        });
-        if (!response.ok) {
-          throw new Error(`Failed to load frame ${index + 1}: ${response.status}`);
-        }
-
-        const bitmap = await createImageBitmap(await response.blob());
-        if (
-          cancelled ||
-          controller.signal.aborted ||
-          activeRequests.get(index) !== controller
-        ) {
-          bitmap.close();
-          return;
-        }
-
-        frames[index] = bitmap;
-        states[index] = 2;
-        if (!loadedRef.current) {
-          loadedRef.current = true;
-          setLoadProgress(1);
-          setLoaded(true);
-        }
-        if (waitingForFrameRef.current || index === targetFrameRef.current) {
-          startRafLoopRef.current();
-        }
-        evictFrames();
-      } catch (error) {
-        if (activeRequests.get(index) !== controller) return;
-        frames[index] = undefined;
-        states[index] = controller.signal.aborted ? 0 : 3;
-        if (controller.signal.aborted && wantedFrames.has(index)) {
-          queue.unshift(index);
-        }
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          console.warn(error);
-        }
-      } finally {
-        if (activeRequests.get(index) === controller) {
-          activeRequests.delete(index);
-          activeLoads -= 1;
-        }
-        pumpQueue();
+    const evictFrames = () => {
+      const ready = states
+        .map((s, i) => s === 2 ? i : -1)
+        .filter((i) => i >= 0);
+      if (ready.length <= MAX_CACHED_FRAMES) return;
+      ready.sort((a, b) =>
+        Math.abs(b - targetFrameRef.current) - Math.abs(a - targetFrameRef.current)
+      );
+      let toRemove = ready.length - MAX_CACHED_FRAMES;
+      for (const i of ready) {
+        if (toRemove <= 0) break;
+        if (wantedFrames.has(i) || i === targetFrameRef.current || i === lastDrawnFrameRef.current) continue;
+        closeBitmap(i);
+        states[i] = 0;
+        toRemove -= 1;
       }
     };
 
@@ -274,38 +185,98 @@ export function useCanvasImageSequence({
       while (!cancelled && nearbyRef.current && activeLoads < PARALLEL_LOADS && queue.length) {
         const index = queue.shift();
         if (index === undefined || states[index] !== 0) continue;
-        void loadFrame(index);
+
+        const controller = new AbortController();
+        controllers.set(index, controller);
+        activeLoads += 1;
+        states[index] = 1;
+
+        const url = framePath(index + 1);
+
+        fetch(url, { signal: controller.signal } as RequestInit)
+          .then((res) => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.blob();
+          })
+          .then((blob) =>
+            createImageBitmap(blob, {
+              premultiplyAlpha: "none",
+              colorSpaceConversion: "none",
+            })
+          )
+          .then((bitmap) => {
+            // If this slot was aborted/evicted while we were decoding, discard
+            if (!controllers.has(index) || cancelled) {
+              try { bitmap.close(); } catch { /* ok */ }
+              return;
+            }
+            controllers.delete(index);
+            activeLoads -= 1;
+            if (cancelled) { try { bitmap.close(); } catch { /* ok */ } return; }
+
+            frames[index] = bitmap;
+            states[index] = 2;
+
+            if (!loadedRef.current) {
+              loadedRef.current = true;
+              setLoadProgress(1);
+              setLoaded(true);
+            }
+            // Wake the render loop if it's waiting or this is the target
+            if (waitingForFrameRef.current || index === targetFrameRef.current) {
+              startRafLoopRef.current();
+            }
+            evictFrames();
+            pumpQueue();
+          })
+          .catch((err: unknown) => {
+            // AbortError means we intentionally cancelled — activeLoads already fixed
+            if ((err as { name?: string }).name === "AbortError") return;
+            // Slot cleaned up externally (e.g. stopAggressiveLoading raced us)
+            if (!controllers.has(index)) return;
+            controllers.delete(index);
+            activeLoads -= 1;
+            if (cancelled) return;
+            states[index] = 3;
+            pumpQueue();
+          });
+      }
+    };
+
+    // Abort & reset a single in-flight slot — adjusts activeLoads correctly
+    const abortSlot = (index: number) => {
+      const ctrl = controllers.get(index);
+      if (!ctrl) return;
+      ctrl.abort();
+      controllers.delete(index);
+      // Only reset state if the promise hasn't resolved yet (still "loading")
+      if (states[index] === 1) {
+        states[index] = 0;
+        frames[index] = undefined;
+        activeLoads = Math.max(0, activeLoads - 1);
       }
     };
 
     const stopAggressiveLoading = () => {
+      // Abort all in-flight requests to save bandwidth when section leaves viewport
+      for (const index of [...controllers.keys()]) abortSlot(index);
       queue = [];
       wantedFrames.clear();
-      for (const controller of activeRequests.values()) controller.abort();
     };
 
     const ensureFrames = (index: number, direction: number) => {
       if (cancelled || !nearbyRef.current) return;
-      const travelDirection = direction < 0 ? -1 : 1;
+      const dir = direction < 0 ? -1 : 1;
       const desired = [index];
-      for (let distance = 1; distance <= PRELOAD_AHEAD; distance += 1) {
-        const ahead = index + distance * travelDirection;
-        if (ahead >= 0 && ahead < frameCount) desired.push(ahead);
-        if (distance <= PRELOAD_BEHIND) {
-          const behind = index - distance * travelDirection;
-          if (behind >= 0 && behind < frameCount) desired.push(behind);
-        }
+      for (let d = 1; d <= PRELOAD_AHEAD; d++) {
+        const fwd = index + d * dir;
+        const bck = index - d * dir;
+        if (fwd >= 0 && fwd < frameCount) desired.push(fwd);
+        if (d <= PRELOAD_BEHIND && bck >= 0 && bck < frameCount) desired.push(bck);
       }
       wantedFrames = new Set(desired);
-
-      // Cancel stale downloads after a rapid direction/position change. Frames
-      // that already decoded remain cached until normal distance-based eviction.
-      for (const [frame, controller] of activeRequests) {
-        if (!wantedFrames.has(frame)) controller.abort();
-      }
-
-      // Replace, rather than append to, pending work.
-      queue = desired.filter((frame) => states[frame] === 0);
+      // Replace pending queue — in-flight requests are allowed to finish
+      queue = desired.filter((f) => states[f] === 0);
       evictFrames();
       pumpQueue();
     };
@@ -315,11 +286,8 @@ export function useCanvasImageSequence({
     const nearbyObserver = new IntersectionObserver(
       ([entry]) => {
         nearbyRef.current = entry.isIntersecting;
-        if (entry.isIntersecting) {
-          ensureFrames(targetFrameRef.current, directionRef.current);
-        } else {
-          stopAggressiveLoading();
-        }
+        if (entry.isIntersecting) ensureFrames(targetFrameRef.current, directionRef.current);
+        else stopAggressiveLoading();
       },
       { rootMargin: "120% 0px 100% 0px" },
     );
@@ -329,26 +297,24 @@ export function useCanvasImageSequence({
         ensureFrames(targetFrameRef.current, directionRef.current);
         startRafLoopRef.current();
       } else {
-        if (rafRef.current !== null) {
-          cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
+        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         waitingForFrameRef.current = false;
       }
     });
-    if (section) {
-      nearbyObserver.observe(section);
-      activeObserver.observe(section);
-    }
+    if (section) { nearbyObserver.observe(section); activeObserver.observe(section); }
 
     return () => {
       cancelled = true;
       nearbyObserver.disconnect();
       activeObserver.disconnect();
-      stopAggressiveLoading();
+      // Abort every in-flight fetch
+      for (const ctrl of controllers.values()) ctrl.abort();
+      controllers.clear();
+      queue = [];
+      wantedFrames.clear();
       ensureFramesRef.current = () => undefined;
-      for (const bitmap of frames) bitmap?.close();
-      framesRef.current = [];
+      // Return GPU memory from all loaded bitmaps
+      for (let i = 0; i < frames.length; i++) closeBitmap(i);
     };
   }, [frameCount, framePath]);
 
@@ -358,39 +324,37 @@ export function useCanvasImageSequence({
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
-    // Cap DPR at 1.25–1.5 to avoid massive canvas pixel counts on hi-DPI screens
+    // Cap DPR 1.25–1.5: retina sharpness without excess pixel budget
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    let width = Math.round(bounds.width * dpr);
-    let height = Math.round(bounds.height * dpr);
-    const pixelCount = width * height;
-    if (pixelCount > maxCanvasPixels) {
-      const scale = Math.sqrt(maxCanvasPixels / pixelCount);
-      width = Math.round(width * scale);
-      height = Math.round(height * scale);
+    let w = Math.round(bounds.width * dpr);
+    let h = Math.round(bounds.height * dpr);
+    const px = w * h;
+    if (px > maxCanvasPixels) {
+      const s = Math.sqrt(maxCanvasPixels / px);
+      w = Math.round(w * s);
+      h = Math.round(h * s);
     }
-    if (canvas.width === width && canvas.height === height) return;
-    canvas.width = width;
-    canvas.height = height;
-    // Eagerly (re-)acquire the context so drawTargetFrame's hot path never
-    // has to call getContext() during a scroll RAF tick.
+    if (canvas.width === w && canvas.height === h) return;
+    canvas.width = w;
+    canvas.height = h;
+    // Eagerly acquire context — never touches getContext() during scroll RAF
     const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
     if (ctx) {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "medium";
       contextRef.current = ctx;
     }
-    // Redraw current frame at new resolution
-    lastDrawnFrameRef.current = -1;
+    lastDrawnFrameRef.current = -1; // force redraw at new resolution
     startRafLoopRef.current();
   }, [maxCanvasPixels]);
 
   useEffect(() => {
     resizeCanvas();
     const canvas = canvasRef.current;
-    const resizeObserver = new ResizeObserver(resizeCanvas);
-    if (canvas) resizeObserver.observe(canvas);
+    const ro = new ResizeObserver(resizeCanvas);
+    if (canvas) ro.observe(canvas);
     return () => {
-      resizeObserver.disconnect();
+      ro.disconnect();
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, [resizeCanvas]);
