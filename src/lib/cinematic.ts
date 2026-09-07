@@ -19,9 +19,9 @@ export const BEATS: Beat[] = [
     show: 0.1,
     hide: 0.3,
     label: "01 — Ignition",
-    quote: "Yeah, I can fly.",
-    speaker: "Tony Stark",
-    film: "IRON MAN — 2008",
+    quote: "Some are born with a reactor. I was born with a keyboard — same glow, different core.",
+    speaker: "Shivam",
+    film: "ORIGIN STORY — 2026",
   },
   {
     id: "b2",

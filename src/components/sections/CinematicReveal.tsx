@@ -241,11 +241,12 @@ export function CinematicReveal() {
             >
               And I am
               <br />
-              <span className="text-accent">Iron Man.</span>
+              <span className="text-accent">Shivam.</span>
             </h2>
           </div>
           <p className="max-w-[42ch] font-sans text-sm leading-relaxed text-zinc-400 md:text-base">
-            Endgame &mdash; the snap heard across the universe. J.A.R.V.I.S. held the last frame so we could rebuild from it.
+            Endgame &mdash; the snap heard across the universe. Stark handed off
+            the arc reactor; Shivam never turned it off.
           </p>
         </div>
 

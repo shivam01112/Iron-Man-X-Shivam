@@ -31,9 +31,9 @@ export function SystemsNominal() {
           <AnimatedItem>
             <p className="max-w-[48ch] font-sans text-base leading-relaxed text-zinc-400 md:text-lg">
               A snap heard around the universe. The Mark LXXXV was engineered in
-              six hours and retired in seconds &mdash; its final moment, the
-              reason any of us are still here. Every readout below is what
-              J.A.R.V.I.S. logged in the last frame before the blast.
+              six hours and retired in seconds &mdash; and somehow, builds later,
+              it&rsquo;s still Shivam holding the blueprint. Every readout below
+              is what J.A.R.V.I.S. logged before handing him the keys.
             </p>
           </AnimatedItem>
           <AnimatedItem>
