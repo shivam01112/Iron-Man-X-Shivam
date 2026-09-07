@@ -242,7 +242,7 @@ export function Hero() {
           <h2 className="font-sans font-semibold leading-[0.88] tracking-tighter text-foreground text-[clamp(4rem,9.5vw,9rem)]">
             Build
             <br />
-            with <span className="text-accent">Devini</span>
+            x  <span className="text-accent">Shivam</span>
           </h2>
           <p className="max-w-[36ch] font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-400">
             Interfaces &amp; products, engineered like the Mark LXXXV.

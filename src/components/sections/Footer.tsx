@@ -14,7 +14,7 @@ export function Footer() {
                 aria-hidden
                 className="inline-block h-2 w-2 rounded-full bg-accent shadow-[0_0_12px_rgba(212,162,47,0.9)]"
               />
-              Stark / Industries
+              Iron Man &times; Shivam
             </div>
             <p className="max-w-[38ch] font-sans text-sm leading-relaxed text-zinc-400">
               &copy; Stark Industries &mdash; 10880 Malibu Point, 90265.
