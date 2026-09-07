@@ -1,13 +1,22 @@
 import type { Metadata } from "next";
-import { GeistSans } from "geist/font/sans";
-import { GeistMono } from "geist/font/mono";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { SmoothScrollProvider } from "@/components/providers/SmoothScrollProvider";
 
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
 export const metadata: Metadata = {
-  title: "Iron Man × Shivam",
+  title: "Stark Industries — Mark LXXXV",
   description:
-    "A cinematic Iron Man experience created by Shivam.",
+    "Arc reactor online. J.A.R.V.I.S. standing by. Scroll to engage the Mark LXXXV.",
   metadataBase: new URL("http://localhost:3000"),
 };
 
@@ -17,16 +26,8 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${GeistSans.variable} ${GeistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <head>
-        <link
-          rel="preload"
-          as="image"
-          href="/frames/frame_0001.jpg"
-          fetchPriority="high"
-        />
-      </head>
       <body className="relative min-h-full bg-background text-foreground grain">
         <SmoothScrollProvider>{children}</SmoothScrollProvider>
       </body>

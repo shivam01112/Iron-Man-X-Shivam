@@ -1,65 +1,189 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EyebrowBadge } from "@/components/ui/EyebrowBadge";
 import { HudFrame } from "@/components/ui/HudFrame";
-import { useCanvasImageSequence } from "@/hooks/useCanvasImageSequence";
 import { BEATS, CINE_FRAME_COUNT, cineFramePath } from "@/lib/cinematic";
-import { updateBeatVisibility } from "@/lib/scrollBeats";
-
-const MAX_CANVAS_PIXELS = 1600 * 900;
 
 export function CinematicReveal() {
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const h2InevitableRef = useRef<HTMLHeadingElement | null>(null);
   const h2IronManRef = useRef<HTMLHeadingElement | null>(null);
   const outroRef = useRef<HTMLDivElement | null>(null);
   const progressFillRef = useRef<HTMLDivElement | null>(null);
   const seqReadoutRef = useRef<HTMLSpanElement | null>(null);
-  const beatElementsRef = useRef<Map<string, HTMLElement>>(new Map());
 
-  const handleProgress = useCallback((progress: number, frameIndex: number) => {
-    if (h2InevitableRef.current) {
-      const opacity = Math.min(1, Math.max(0, (0.52 - progress) / 0.1));
-      h2InevitableRef.current.style.opacity = String(opacity);
-    }
+  const framesRef = useRef<HTMLImageElement[]>([]);
+  const tickingRef = useRef(false);
+  const loadedRef = useRef(false);
+  const lastFrameRef = useRef(-1);
+  const prevVisibleIdsRef = useRef("");
 
-    if (h2IronManRef.current) {
-      const opacity = Math.min(1, Math.max(0, (progress - 0.48) / 0.1));
-      h2IronManRef.current.style.opacity = String(opacity);
-    }
+  const [loadProgress, setLoadProgress] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [visibleBeats, setVisibleBeats] = useState<Set<string>>(new Set());
 
-    if (outroRef.current) {
-      const opacity = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
-      outroRef.current.style.opacity = String(opacity);
-      outroRef.current.style.transform = `translate3d(0, ${(1 - opacity) * 14}px, 0)`;
-    }
+  useEffect(() => {
+    let cancelled = false;
+    let loadedCount = 0;
+    const imgs: HTMLImageElement[] = [];
 
-    if (progressFillRef.current) {
-      progressFillRef.current.style.transform = `scaleX(${progress})`;
+    for (let i = 1; i <= CINE_FRAME_COUNT; i++) {
+      const img = new Image();
+      img.src = cineFramePath(i);
+      img.onload = () => {
+        if (cancelled) return;
+        loadedCount++;
+        setLoadProgress(loadedCount / CINE_FRAME_COUNT);
+        if (loadedCount === CINE_FRAME_COUNT) {
+          loadedRef.current = true;
+          setLoaded(true);
+        }
+      };
+      img.onerror = () => {
+        if (cancelled) return;
+        loadedCount++;
+        setLoadProgress(loadedCount / CINE_FRAME_COUNT);
+        if (loadedCount === CINE_FRAME_COUNT) {
+          loadedRef.current = true;
+          setLoaded(true);
+        }
+      };
+      imgs.push(img);
     }
+    framesRef.current = imgs;
 
-    if (seqReadoutRef.current) {
-      const frameNumber = Math.min(CINE_FRAME_COUNT, frameIndex + 1);
-      seqReadoutRef.current.textContent =
-        `SEQ ${String(frameNumber).padStart(3, "0")} / ${CINE_FRAME_COUNT}`;
-    }
-
-    updateBeatVisibility(beatElementsRef.current, BEATS, progress);
-    for (const beat of BEATS) {
-      const mobileElement = beatElementsRef.current.get(`${beat.id}-mobile`);
-      if (!mobileElement) continue;
-      const visible = progress >= beat.show && progress <= beat.hide;
-      mobileElement.classList.toggle("is-visible", visible);
-    }
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const { sectionRef, canvasRef, loadProgress, loaded } = useCanvasImageSequence({
-    frameCount: CINE_FRAME_COUNT,
-    framePath: cineFramePath,
-    maxCanvasPixels: MAX_CANVAS_PIXELS,
-    mobileScale: 1.3,
-    onProgress: handleProgress,
-  });
+  const drawFrame = useCallback((index: number) => {
+    const canvas = canvasRef.current;
+    const img = framesRef.current[index];
+    if (!canvas || !img || !img.complete || !img.naturalWidth) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const cw = canvas.width;
+    const ch = canvas.height;
+    const imgRatio = img.naturalWidth / img.naturalHeight;
+    const canvasRatio = cw / ch;
+
+    let drawW: number;
+    let drawH: number;
+    if (canvasRatio > imgRatio) {
+      drawW = cw;
+      drawH = cw / imgRatio;
+    } else {
+      drawH = ch;
+      drawW = ch * imgRatio;
+    }
+
+    if (window.innerWidth <= 768) {
+      drawW *= 1.3;
+      drawH *= 1.3;
+    }
+
+    const drawX = (cw - drawW) / 2;
+    const drawY = (ch - drawH) / 2;
+
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+  }, []);
+
+  const resizeCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    drawFrame(lastFrameRef.current >= 0 ? lastFrameRef.current : 0);
+  }, [drawFrame]);
+
+  useEffect(() => {
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+    return () => window.removeEventListener("resize", resizeCanvas);
+  }, [resizeCanvas]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    drawFrame(0);
+    lastFrameRef.current = 0;
+  }, [loaded, drawFrame]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (tickingRef.current) return;
+      tickingRef.current = true;
+
+      requestAnimationFrame(() => {
+        tickingRef.current = false;
+        const section = sectionRef.current;
+        if (!section || !loadedRef.current) return;
+
+        const rect = section.getBoundingClientRect();
+        const scrollable = section.offsetHeight - window.innerHeight;
+        const progress =
+          scrollable <= 0
+            ? 0
+            : Math.min(1, Math.max(0, -rect.top / scrollable));
+
+        const frameIndex = Math.min(
+          CINE_FRAME_COUNT - 1,
+          Math.floor(progress * CINE_FRAME_COUNT),
+        );
+        if (frameIndex !== lastFrameRef.current) {
+          lastFrameRef.current = frameIndex;
+          drawFrame(frameIndex);
+        }
+
+        if (h2InevitableRef.current) {
+          const op = Math.min(1, Math.max(0, (0.52 - progress) / 0.1));
+          h2InevitableRef.current.style.opacity = String(op);
+        }
+
+        if (h2IronManRef.current) {
+          const op = Math.min(1, Math.max(0, (progress - 0.48) / 0.1));
+          h2IronManRef.current.style.opacity = String(op);
+        }
+
+        if (outroRef.current) {
+          const op = Math.min(1, Math.max(0, (progress - 0.86) / 0.06));
+          outroRef.current.style.opacity = String(op);
+          outroRef.current.style.transform = `translateY(${(1 - op) * 14}px)`;
+        }
+
+        if (progressFillRef.current) {
+          progressFillRef.current.style.transform = `scaleX(${progress})`;
+        }
+
+        if (seqReadoutRef.current) {
+          const n = Math.min(CINE_FRAME_COUNT, frameIndex + 1);
+          seqReadoutRef.current.textContent =
+            `SEQ ${String(n).padStart(3, "0")} / ${CINE_FRAME_COUNT}`;
+        }
+
+        const newVisible = new Set<string>();
+        for (const b of BEATS) {
+          if (progress >= b.show && progress <= b.hide) newVisible.add(b.id);
+        }
+        const newIds = [...newVisible].sort().join(",");
+        if (newIds !== prevVisibleIdsRef.current) {
+          prevVisibleIdsRef.current = newIds;
+          setVisibleBeats(newVisible);
+        }
+      });
+    };
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [drawFrame]);
 
   return (
     <section
@@ -69,12 +193,12 @@ export function CinematicReveal() {
     >
       <div
         className="sticky top-0 min-h-[100dvh] w-full overflow-hidden bg-background"
-        style={{ height: "100dvh", transform: "translateZ(0)" }}
+        style={{ height: "100dvh", willChange: "transform", transform: "translateZ(0)" }}
       >
         <canvas
           ref={canvasRef}
           className="absolute inset-0 h-full w-full"
-          style={{ transform: "translateZ(0)", contain: "strict" }}
+          style={{ willChange: "contents", transform: "translateZ(0)" }}
         />
 
         <div
@@ -99,21 +223,21 @@ export function CinematicReveal() {
         </div>
 
         <div className="pointer-events-none absolute right-6 top-28 z-10 flex max-w-[46ch] flex-col items-end gap-5 text-right md:right-12 md:top-32">
-          <EyebrowBadge>SHIVAM // CREATOR MODE</EyebrowBadge>
+          <EyebrowBadge>TITAN II // FINAL FRAME</EyebrowBadge>
           <div className="relative self-stretch">
             <h2
               ref={h2InevitableRef}
               className="font-sans text-4xl font-semibold leading-[0.98] tracking-tighter text-foreground md:text-6xl lg:text-7xl"
-              style={{ opacity: 1 }}
+              style={{ transition: "opacity 240ms ease-out" }}
             >
               I am
               <br />
-              <span className="text-accent">Shivam.</span>
+              <span className="text-accent">Inevitable.</span>
             </h2>
             <h2
               ref={h2IronManRef}
               className="absolute inset-0 font-sans text-4xl font-semibold leading-[0.98] tracking-tighter text-foreground md:text-6xl lg:text-7xl"
-              style={{ opacity: 0 }}
+              style={{ opacity: 0, transition: "opacity 240ms ease-out" }}
             >
               And I am
               <br />
@@ -121,15 +245,14 @@ export function CinematicReveal() {
             </h2>
           </div>
           <p className="max-w-[42ch] font-sans text-sm leading-relaxed text-zinc-400 md:text-base">
-            One creator. One iconic hero. A cinematic experience where Shivam&apos;s
-            imagination meets the unstoppable spirit of Iron Man.
+            Endgame &mdash; the snap heard across the universe. J.A.R.V.I.S. held the last frame so we could rebuild from it.
           </p>
         </div>
 
         <div className="pointer-events-none absolute left-6 top-20 z-10 flex items-center gap-2 md:left-10 md:top-24">
           <div className="h-px w-8 bg-accent/60" />
           <span className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-400">
-            Creator Log &mdash; Active
+            Flight Log &mdash; Archived
           </span>
         </div>
 
@@ -151,17 +274,18 @@ export function CinematicReveal() {
             <div
               ref={progressFillRef}
               className="h-full origin-left bg-accent"
-              style={{ transform: "scaleX(0)" }}
+              style={{ transform: "scaleX(0)", transition: "transform 80ms linear" }}
             />
           </div>
           <div className="mx-6 flex items-center justify-between pb-4 font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500 md:mx-10">
-            <span>IRON MAN // ACTIVE</span>
-            <span>SHIVAM // CREATOR</span>
+            <span>MARK III // ARCHIVE</span>
+            <span>J.A.R.V.I.S. // PLAYBACK</span>
             <span>Scroll &darr;</span>
           </div>
         </div>
 
         {BEATS.map((b, i) => {
+          const visible = visibleBeats.has(b.id);
           const position =
             i === 0
               ? "top-[24%] left-6 md:left-12"
@@ -174,11 +298,9 @@ export function CinematicReveal() {
               className={`pointer-events-none absolute ${position} z-20 hidden w-[420px] max-w-[90vw] md:block`}
             >
               <figure
-                ref={(element) => {
-                  if (element) beatElementsRef.current.set(b.id, element);
-                  else beatElementsRef.current.delete(b.id);
-                }}
-                className="card-scroll scroll-beat pointer-events-auto p-6"
+                className={`card-surface pointer-events-auto p-6 transition-all duration-400 ease-out ${
+                  visible ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0"
+                }`}
               >
                 <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">
                   {b.label}
@@ -198,14 +320,14 @@ export function CinematicReveal() {
         })}
 
         <div className="pointer-events-none absolute inset-x-0 top-[36%] z-20 flex flex-col gap-3 px-6 md:hidden">
-          {BEATS.map((b) => (
+          {BEATS.map((b) => {
+            const visible = visibleBeats.has(b.id);
+            return (
               <figure
                 key={b.id}
-                ref={(element) => {
-                  if (element) beatElementsRef.current.set(`${b.id}-mobile`, element);
-                  else beatElementsRef.current.delete(`${b.id}-mobile`);
-                }}
-                className="card-scroll scroll-beat scroll-beat-sm p-5"
+                className={`card-surface pointer-events-auto p-5 transition-all duration-400 ease-out ${
+                  visible ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
+                }`}
               >
                 <span className="font-mono text-[9px] uppercase tracking-[0.28em] text-accent">
                   {b.label}
@@ -220,20 +342,25 @@ export function CinematicReveal() {
                   </span>
                 </figcaption>
               </figure>
-          ))}
+            );
+          })}
         </div>
 
         <div
           ref={outroRef}
           className="pointer-events-none absolute bottom-24 right-6 z-10 flex flex-col items-end gap-4 md:bottom-32 md:right-12"
-          style={{ opacity: 0 }}
+          style={{ opacity: 0, transition: "opacity 80ms linear" }}
         >
           <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">
-            Journey &mdash; complete
+            Next &mdash; engage
           </span>
-          <span className="rounded-full border border-white/15 bg-white/[0.06] px-5 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.22em] text-foreground backdrop-blur-md">
-            Iron Man &times; Shivam
-          </span>
+          <a
+            href="#systems"
+            className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-5 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.22em] text-foreground backdrop-blur-md transition-all duration-200 hover:bg-white/[0.12] active:translate-y-[1px]"
+          >
+            Open diagnostics
+            <span aria-hidden>&darr;</span>
+          </a>
         </div>
 
         {!loaded && (
